@@ -136,6 +136,9 @@ To add your own configurations, edit `~/.apdata/config.json` and add entries fol
 
 # Clone with WHERE clause filter
 ./apdata clone mysql --source acme/prod --dest acme/local --table users --where "created_at > '2024-01-01'"
+
+# Schema export now uses parallel processing by default
+./apdata clone mysql --source acme/prod --dest acme/local
 ```
 
 ### Advanced DynamoDB Options
@@ -245,3 +248,39 @@ go test ./config -run TestParseConnectionString
 - **Integration Tests**: End-to-end component interaction
 
 All tests work without external dependencies and include proper cleanup and state management.
+
+## Performance Optimization
+
+The tool includes several performance optimizations:
+
+### MySQL Performance Features
+
+**Standard Schema Export:**
+- Uses optimized mysqldump flags (`--single-transaction`, `--quick`, `--lock-tables=false`)
+- Skips unnecessary comments and uses compact output
+- Includes detailed timing measurements and progress tracking
+
+**Optimized Schema Export (Default):**
+- Uses highly optimized mysqldump flags for maximum performance
+- Includes tables, routines, triggers, and events in a single efficient operation
+- Uses optimized import settings (`--disable-keys`, `--single-transaction`)
+- Provides detailed performance breakdowns showing time spent in each phase
+
+**Performance Monitoring:**
+- Logs detailed timing for each operation (recreate, export, import)
+- Shows percentage breakdown of time spent in each phase  
+- Reports file sizes and transfer rates
+- Enables easy identification of bottlenecks
+
+### Usage Examples
+
+```bash
+# Monitor performance with verbose logging (optimized export enabled by default)
+./apdata clone mysql --source acme/prod --dest acme/local --verbose
+```
+
+The optimized export is beneficial for databases with:
+- Many stored procedures/functions
+- Complex trigger definitions  
+- Large numbers of tables
+- Any schema where performance matters

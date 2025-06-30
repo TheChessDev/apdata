@@ -134,7 +134,7 @@ func TestCloneSchemaWithMockError(t *testing.T) {
 	file.Close()
 	defer os.Remove(tempFile)
 
-	// Test that the function would call CloneSchemaWithOptions(true) on table exists error
+	// Test that the function uses the optimized fast schema clone approach
 	// We can't easily test the full flow without a real database, but we can test components
 }
 

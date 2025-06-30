@@ -87,6 +87,10 @@ func formatError(err error) error {
 		return fmt.Errorf("❌ Cannot connect to MySQL server. Please check your connection settings.")
 	}
 
+	if strings.Contains(errStr, "Access denied") && strings.Contains(errStr, "FLUSH") {
+		return fmt.Errorf("❌ MySQL user lacks required privileges (RELOAD). This is common with RDS instances. The export should still work - please check if the operation completed successfully.")
+	}
+
 	if strings.Contains(errStr, "Access denied") {
 		return fmt.Errorf("❌ MySQL authentication failed. Please check your username and password.")
 	}
