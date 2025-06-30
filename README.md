@@ -158,6 +158,9 @@ To add your own configurations, edit `~/.apdata/config.json` and add entries fol
 # Clone DynamoDB data with prefix-based table discovery
 ./apdata clone dynamodb --source acme/dev --dest julian/dev
 
+# Clone DynamoDB data for a specific component with interactive selection
+./apdata clone dynamodb --source acme/dev --dest julian/dev --component-name my-service --interactive
+
 # Clone both MySQL and DynamoDB with prefix mapping
 ./apdata clone all --source acme/dev --dest julian/dev
 ```
@@ -182,7 +185,7 @@ For more granular control, you can specify a component name and use interactive 
 
 ```bash
 # Interactive checkbox selection for a specific component
-./apdata clone dynamodb --source acme/dev --dest julian/dev --component-name connectors-data-api --interactive
+./apdata clone dynamodb --source acme/dev --dest julian/dev --component-name my-component --interactive
 ```
 
 This will:
@@ -222,7 +225,7 @@ Use ↑/↓ to navigate, SPACE to select/deselect, ENTER to confirm
 # Clone with WHERE clause filter
 ./apdata clone mysql --source acme/prod --dest acme/local --table users --where "created_at > '2024-01-01'"
 
-# Schema export now uses parallel processing by default
+# Schema export uses parallel processing by default
 ./apdata clone mysql --source acme/prod --dest acme/local
 ```
 
@@ -262,7 +265,7 @@ Use ↑/↓ to navigate, SPACE to select/deselect, ENTER to confirm
 ### Optional Flags
 
 - `--table`: Specific table name to clone (MySQL only)
-- `--component-name`: Component name for prefix-based cloning (e.g., connectors-data-api)
+- `--component-name`: Component name for prefix-based cloning (DynamoDB only, e.g., connectors-data-api)
 - `--interactive`: Enable interactive checkbox selection when using --component-name (DynamoDB)
 - `--filter`: DynamoDB filter expression
 - `--where`: MySQL WHERE clause
@@ -396,14 +399,6 @@ The tool includes several performance optimizations:
 - Reports file sizes and transfer rates
 - Enables easy identification of bottlenecks
 
-**Loading Indicators & Progress Feedback:**
-
-- **Visual Spinners**: Shows animated loading indicators for all long-running operations
-- **Operation-Specific Messages**: "Analyzing table sizes", "Exporting table_name data", "Processing chunk 3/10"
-- **Real-time Progress**: Updates spinner messages during chunked operations
-- **Parallel Processing Feedback**: Shows when multiple tables are being processed simultaneously
-- **Intelligent Display**: Automatically hides spinners in verbose mode to avoid conflicts with detailed logging
-
 ### Usage Examples
 
 ```bash
@@ -480,4 +475,3 @@ The DynamoDB performance optimizations provide significant improvements for:
 - **High-throughput scenarios**: Optimized batch processing maximizes write capacity utilization
 - **Production workloads**: Intelligent defaults work well without tuning
 - **Monitoring & observability**: Comprehensive metrics for performance analysis
-
