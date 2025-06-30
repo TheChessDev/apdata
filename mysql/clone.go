@@ -31,7 +31,7 @@ func NewCloner(source, dest Config) *Cloner {
 }
 
 func (c *Cloner) CloneSchema() error {
-	cmd := exec.Command("mysqldump",
+	args := []string{
 		"--no-data",
 		"--skip-add-drop-table",
 		"--skip-disable-keys",
@@ -40,9 +40,14 @@ func (c *Cloner) CloneSchema() error {
 		fmt.Sprintf("--host=%s", c.Source.Host),
 		fmt.Sprintf("--port=%d", c.Source.Port),
 		fmt.Sprintf("--user=%s", c.Source.User),
-		fmt.Sprintf("--password=%s", c.Source.Password),
-		c.Source.Database,
-	)
+	}
+
+	if c.Source.Password != "" {
+		args = append(args, fmt.Sprintf("--password=%s", c.Source.Password))
+	}
+
+	args = append(args, c.Source.Database)
+	cmd := exec.Command("mysqldump", args...)
 
 	schemaFile := fmt.Sprintf("%s_schema.sql", c.Source.Database)
 	file, err := os.Create(schemaFile)
@@ -80,7 +85,7 @@ func (c *Cloner) CloneData(tables []string) error {
 }
 
 func (c *Cloner) cloneTable(table string) error {
-	cmd := exec.Command("mysqldump",
+	args := []string{
 		"--no-create-info",
 		"--skip-disable-keys",
 		"--single-transaction",
@@ -89,10 +94,14 @@ func (c *Cloner) cloneTable(table string) error {
 		fmt.Sprintf("--host=%s", c.Source.Host),
 		fmt.Sprintf("--port=%d", c.Source.Port),
 		fmt.Sprintf("--user=%s", c.Source.User),
-		fmt.Sprintf("--password=%s", c.Source.Password),
-		c.Source.Database,
-		table,
-	)
+	}
+
+	if c.Source.Password != "" {
+		args = append(args, fmt.Sprintf("--password=%s", c.Source.Password))
+	}
+
+	args = append(args, c.Source.Database, table)
+	cmd := exec.Command("mysqldump", args...)
 
 	dataFile := fmt.Sprintf("%s_%s_data.sql", c.Source.Database, table)
 	file, err := os.Create(dataFile)
@@ -198,13 +207,18 @@ func (c *Cloner) connectDest() (*sql.DB, error) {
 }
 
 func (c *Cloner) importSQL(filename string) error {
-	cmd := exec.Command("mysql",
+	args := []string{
 		fmt.Sprintf("--host=%s", c.Dest.Host),
 		fmt.Sprintf("--port=%d", c.Dest.Port),
 		fmt.Sprintf("--user=%s", c.Dest.User),
-		fmt.Sprintf("--password=%s", c.Dest.Password),
-		c.Dest.Database,
-	)
+	}
+
+	if c.Dest.Password != "" {
+		args = append(args, fmt.Sprintf("--password=%s", c.Dest.Password))
+	}
+
+	args = append(args, c.Dest.Database)
+	cmd := exec.Command("mysql", args...)
 
 	file, err := os.Open(filename)
 	if err != nil {
@@ -292,4 +306,3 @@ func (c *Cloner) insertBatch(stmt *sql.Stmt, batch [][]interface{}) error {
 	}
 	return nil
 }
-
