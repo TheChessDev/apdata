@@ -36,6 +36,8 @@ func runClone(cmd *cobra.Command, args []string) error {
 
 	if verbose {
 		internal.SetLogLevel("debug")
+	} else {
+		internal.SetLogLevel("error")
 	}
 
 	if source == "" || dest == "" {
@@ -179,11 +181,17 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, filter string, c
 		}
 	}
 
-	count, err := cloner.GetItemCount(ctx, options.FilterExpression)
+	err = internal.WithSpinnerConditional("Getting item count", func() error {
+		count, err := cloner.GetItemCount(ctx, options.FilterExpression)
+		if err != nil {
+			internal.Logger.Warn("Failed to get item count", "error", err)
+		} else {
+			internal.Logger.Info("Cloning DynamoDB data", "itemCount", count)
+		}
+		return nil
+	}, !internal.VerboseMode)
 	if err != nil {
-		internal.Logger.Warn("Failed to get item count", "error", err)
-	} else {
-		internal.Logger.Info("Cloning DynamoDB data", "itemCount", count)
+		return err
 	}
 
 	if err := cloner.CloneTable(ctx, options); err != nil {

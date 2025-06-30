@@ -83,6 +83,12 @@ func (c *Cloner) CloneTable(ctx context.Context, options CloneOptions) error {
 
 	internal.Logger.Debug("Starting DynamoDB clone", "table", c.SourceConfig.TableName, "concurrency", options.Concurrency, "batchSize", options.BatchSize)
 
+	var spinner *internal.Spinner
+	if !internal.VerboseMode {
+		spinner = internal.NewSpinner(fmt.Sprintf("Cloning DynamoDB table %s", c.SourceConfig.TableName))
+		spinner.Start()
+	}
+
 	itemChan := make(chan map[string]types.AttributeValue, options.Concurrency*2)
 	errorChan := make(chan error, options.Concurrency)
 
@@ -113,10 +119,16 @@ func (c *Cloner) CloneTable(ctx context.Context, options CloneOptions) error {
 
 	for err := range errorChan {
 		if err != nil {
+			if spinner != nil {
+				spinner.Error(fmt.Sprintf("Failed to clone table %s", c.SourceConfig.TableName))
+			}
 			return err
 		}
 	}
 
+	if spinner != nil {
+		spinner.Success(fmt.Sprintf("DynamoDB table %s cloned successfully", c.SourceConfig.TableName))
+	}
 	return nil
 }
 
@@ -292,6 +304,12 @@ func (c *Cloner) GetItemCount(ctx context.Context, filterExpression *string) (in
 func (c *Cloner) CloneTableStructure(ctx context.Context) error {
 	internal.Logger.Debug("Cloning table structure", "sourceTable", c.SourceConfig.TableName, "destTable", c.DestConfig.TableName)
 
+	var spinner *internal.Spinner
+	if !internal.VerboseMode {
+		spinner = internal.NewSpinner(fmt.Sprintf("Creating table structure for %s", c.DestConfig.TableName))
+		spinner.Start()
+	}
+
 	describeInput := &dynamodb.DescribeTableInput{
 		TableName: aws.String(c.SourceConfig.TableName),
 	}
@@ -338,6 +356,9 @@ func (c *Cloner) CloneTableStructure(ctx context.Context) error {
 	}
 
 	internal.Logger.Debug("Destination table created, waiting for it to become active")
+	if spinner != nil {
+		spinner.UpdateMessage(fmt.Sprintf("Waiting for table %s to become active", c.DestConfig.TableName))
+	}
 
 	waiter := dynamodb.NewTableExistsWaiter(c.DestClient)
 	err = waiter.Wait(ctx, &dynamodb.DescribeTableInput{
@@ -345,7 +366,14 @@ func (c *Cloner) CloneTableStructure(ctx context.Context) error {
 	}, 5*time.Minute)
 
 	if err == nil {
+		if spinner != nil {
+			spinner.Success(fmt.Sprintf("Table structure created: %s", c.DestConfig.TableName))
+		}
 		internal.Logger.Debug("Table structure cloned successfully")
+	} else {
+		if spinner != nil {
+			spinner.Error(fmt.Sprintf("Failed to create table structure: %s", c.DestConfig.TableName))
+		}
 	}
 	return err
 }

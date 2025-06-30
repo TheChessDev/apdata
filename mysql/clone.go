@@ -53,21 +53,28 @@ func (c *Cloner) CloneSchema() error {
 	internal.Logger.Debug("Exporting MySQL schema", "database", c.Source.Database, "host", c.Source.Host)
 
 	schemaFile := fmt.Sprintf("%s_schema.sql", c.Source.Database)
-	file, err := os.Create(schemaFile)
-	if err != nil {
-		return fmt.Errorf("failed to create schema file: %w", err)
-	}
-	defer file.Close()
+	
+	err := internal.SimpleSpinner(fmt.Sprintf("Exporting schema from %s", c.Source.Database), func() error {
+		file, err := os.Create(schemaFile)
+		if err != nil {
+			return fmt.Errorf("failed to create schema file: %w", err)
+		}
+		defer file.Close()
 
-	cmd.Stdout = file
-	if err := cmd.Run(); err != nil {
+		cmd.Stdout = file
+		return cmd.Run()
+	})
+	
+	if err != nil {
 		return fmt.Errorf("failed to export schema: %w", err)
 	}
 
 	internal.Logger.Debug("Schema exported successfully", "file", schemaFile)
 	internal.Logger.Debug("Importing schema to destination", "host", c.Dest.Host, "database", c.Dest.Database)
 
-	return c.importSQL(schemaFile)
+	return internal.SimpleSpinner(fmt.Sprintf("Importing schema to %s", c.Dest.Database), func() error {
+		return c.importSQL(schemaFile)
+	})
 }
 
 func (c *Cloner) CloneData(tables []string) error {
@@ -155,11 +162,26 @@ func (c *Cloner) CloneWithFilter(table, whereClause string) error {
 		query += " WHERE " + whereClause
 	}
 
+	internal.Logger.Debug("Executing query", "query", query)
+
+	var spinner *internal.Spinner
+	if !internal.VerboseMode {
+		spinner = internal.NewSpinner(fmt.Sprintf("Querying table %s", table))
+		spinner.Start()
+	}
+
 	rows, err := sourceDB.Query(query)
 	if err != nil {
+		if spinner != nil {
+			spinner.Error(fmt.Sprintf("Failed to query table %s", table))
+		}
 		return fmt.Errorf("failed to query source: %w", err)
 	}
 	defer rows.Close()
+
+	if spinner != nil {
+		spinner.UpdateMessage(fmt.Sprintf("Processing rows from table %s", table))
+	}
 
 	placeholders := strings.Repeat("?,", len(columns))
 	placeholders = placeholders[:len(placeholders)-1]
@@ -202,9 +224,18 @@ func (c *Cloner) CloneWithFilter(table, whereClause string) error {
 	}
 
 	if len(batch) > 0 {
-		return c.insertBatch(stmt, batch)
+		internal.Logger.Debug("Inserting final batch", "table", table, "batchSize", len(batch))
+		if err := c.insertBatch(stmt, batch); err != nil {
+			if spinner != nil {
+				spinner.Error(fmt.Sprintf("Failed to insert final batch for %s", table))
+			}
+			return err
+		}
 	}
 
+	if spinner != nil {
+		spinner.Success(fmt.Sprintf("Filtered clone completed: %s", table))
+	}
 	return rows.Err()
 }
 
@@ -241,7 +272,13 @@ func (c *Cloner) importSQL(filename string) error {
 	defer file.Close()
 
 	cmd.Stdin = file
-	return cmd.Run()
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to import SQL: %w", err)
+	}
+
+	internal.Logger.Debug("SQL file imported successfully", "file", filename)
+	return nil
 }
 
 func (c *Cloner) importTableData(filename string) error {

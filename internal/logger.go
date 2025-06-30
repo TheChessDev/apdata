@@ -6,6 +6,7 @@ import (
 )
 
 var Logger *slog.Logger
+var VerboseMode bool
 
 func init() {
 	Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -18,6 +19,7 @@ func SetLogLevel(level string) {
 	switch level {
 	case "debug":
 		logLevel = slog.LevelDebug
+		VerboseMode = true
 	case "info":
 		logLevel = slog.LevelInfo
 	case "warn":
