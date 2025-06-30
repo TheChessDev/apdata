@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"apdata/internal"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -49,6 +50,8 @@ func (c *Cloner) CloneSchema() error {
 	args = append(args, c.Source.Database)
 	cmd := exec.Command("mysqldump", args...)
 
+	internal.Logger.Debug("Exporting MySQL schema", "database", c.Source.Database, "host", c.Source.Host)
+
 	schemaFile := fmt.Sprintf("%s_schema.sql", c.Source.Database)
 	file, err := os.Create(schemaFile)
 	if err != nil {
@@ -61,6 +64,9 @@ func (c *Cloner) CloneSchema() error {
 		return fmt.Errorf("failed to export schema: %w", err)
 	}
 
+	internal.Logger.Debug("Schema exported successfully", "file", schemaFile)
+	internal.Logger.Debug("Importing schema to destination", "host", c.Dest.Host, "database", c.Dest.Database)
+
 	return c.importSQL(schemaFile)
 }
 
@@ -71,14 +77,17 @@ func (c *Cloner) CloneData(tables []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to get table list: %w", err)
 		}
+		internal.Logger.Debug("Found tables to clone", "count", len(tables), "tables", tables)
 	}
 
 	orderedTables := c.sortTablesByDependency(tables)
 
-	for _, table := range orderedTables {
+	for i, table := range orderedTables {
+		internal.Logger.Info("Cloning table", "table", table, "progress", fmt.Sprintf("%d/%d", i+1, len(orderedTables)))
 		if err := c.cloneTable(table); err != nil {
 			return fmt.Errorf("failed to clone table %s: %w", table, err)
 		}
+		internal.Logger.Debug("Table cloned successfully", "table", table)
 	}
 
 	return nil
@@ -103,6 +112,8 @@ func (c *Cloner) cloneTable(table string) error {
 	args = append(args, c.Source.Database, table)
 	cmd := exec.Command("mysqldump", args...)
 
+	internal.Logger.Debug("Exporting table data", "table", table, "database", c.Source.Database)
+
 	dataFile := fmt.Sprintf("%s_%s_data.sql", c.Source.Database, table)
 	file, err := os.Create(dataFile)
 	if err != nil {
@@ -115,10 +126,13 @@ func (c *Cloner) cloneTable(table string) error {
 		return fmt.Errorf("failed to export table data: %w", err)
 	}
 
+	internal.Logger.Debug("Table data exported", "table", table, "file", dataFile)
 	return c.importTableData(dataFile)
 }
 
 func (c *Cloner) CloneWithFilter(table, whereClause string) error {
+	internal.Logger.Debug("Starting filtered clone", "table", table, "where", whereClause)
+
 	sourceDB, err := c.connectSource()
 	if err != nil {
 		return err

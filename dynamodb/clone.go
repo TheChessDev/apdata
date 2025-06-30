@@ -10,6 +10,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
+	"apdata/internal"
 )
 
 type Config struct {
@@ -79,6 +81,8 @@ func (c *Cloner) CloneTable(ctx context.Context, options CloneOptions) error {
 		options.BatchSize = 25
 	}
 
+	internal.Logger.Debug("Starting DynamoDB clone", "table", c.SourceConfig.TableName, "concurrency", options.Concurrency, "batchSize", options.BatchSize)
+
 	itemChan := make(chan map[string]types.AttributeValue, options.Concurrency*2)
 	errorChan := make(chan error, options.Concurrency)
 
@@ -128,16 +132,22 @@ func (c *Cloner) scanTable(ctx context.Context, itemChan chan<- map[string]types
 	}
 
 	if options.FilterExpression == nil {
+		internal.Logger.Debug("Using parallel scan (no filter)", "segments", options.Concurrency)
 		return c.parallelScan(ctx, itemChan, input, options.Concurrency)
+	} else {
+		internal.Logger.Debug("Using sequential scan with filter", "filter", *options.FilterExpression)
 	}
 
 	paginator := dynamodb.NewScanPaginator(c.SourceClient, input)
 
+	pageCount := 0
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to scan page: %w", err)
 		}
+		pageCount++
+		internal.Logger.Debug("Processed scan page", "page", pageCount, "items", len(page.Items))
 
 		for _, item := range page.Items {
 			select {
@@ -240,8 +250,11 @@ func (c *Cloner) writeBatch(ctx context.Context, batch []types.WriteRequest) err
 
 		unprocessed := result.UnprocessedItems[c.DestConfig.TableName]
 		if len(unprocessed) == 0 {
+			internal.Logger.Debug("Batch write completed", "items", len(batch))
 			return nil
 		}
+
+		internal.Logger.Debug("Retrying unprocessed items", "retry", retry+1, "unprocessed", len(unprocessed))
 
 		input.RequestItems[c.DestConfig.TableName] = unprocessed
 
@@ -277,6 +290,8 @@ func (c *Cloner) GetItemCount(ctx context.Context, filterExpression *string) (in
 }
 
 func (c *Cloner) CloneTableStructure(ctx context.Context) error {
+	internal.Logger.Debug("Cloning table structure", "sourceTable", c.SourceConfig.TableName, "destTable", c.DestConfig.TableName)
+
 	describeInput := &dynamodb.DescribeTableInput{
 		TableName: aws.String(c.SourceConfig.TableName),
 	}
@@ -322,9 +337,16 @@ func (c *Cloner) CloneTableStructure(ctx context.Context) error {
 		return fmt.Errorf("failed to create destination table: %w", err)
 	}
 
+	internal.Logger.Debug("Destination table created, waiting for it to become active")
+
 	waiter := dynamodb.NewTableExistsWaiter(c.DestClient)
-	return waiter.Wait(ctx, &dynamodb.DescribeTableInput{
+	err = waiter.Wait(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(c.DestConfig.TableName),
 	}, 5*time.Minute)
+
+	if err == nil {
+		internal.Logger.Debug("Table structure cloned successfully")
+	}
+	return err
 }
 
