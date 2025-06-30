@@ -15,7 +15,7 @@ import (
 type Config struct {
 	Region    string
 	TableName string
-	Endpoint  string // Optional for local DynamoDB
+	Endpoint  string
 }
 
 type Cloner struct {
@@ -26,11 +26,11 @@ type Cloner struct {
 }
 
 type CloneOptions struct {
-	FilterExpression     *string
+	FilterExpression          *string
 	ExpressionAttributeNames  map[string]string
 	ExpressionAttributeValues map[string]types.AttributeValue
-	Concurrency         int
-	BatchSize           int
+	Concurrency               int
+	BatchSize                 int
 }
 
 func NewCloner(sourceConfig, destConfig Config) (*Cloner, error) {
@@ -61,8 +61,7 @@ func createClient(cfg Config) (*dynamodb.Client, error) {
 	}
 
 	client := dynamodb.NewFromConfig(awsConfig)
-	
-	// Use custom endpoint if provided (for local DynamoDB)
+
 	if cfg.Endpoint != "" {
 		client = dynamodb.NewFromConfig(awsConfig, func(o *dynamodb.Options) {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
@@ -72,21 +71,17 @@ func createClient(cfg Config) (*dynamodb.Client, error) {
 	return client, nil
 }
 
-// CloneTable clones a DynamoDB table with optional filtering and parallel processing
 func (c *Cloner) CloneTable(ctx context.Context, options CloneOptions) error {
-	// Set defaults
 	if options.Concurrency == 0 {
 		options.Concurrency = 10
 	}
 	if options.BatchSize == 0 {
-		options.BatchSize = 25 // DynamoDB batch write limit
+		options.BatchSize = 25
 	}
 
-	// Create channels for parallel processing
 	itemChan := make(chan map[string]types.AttributeValue, options.Concurrency*2)
 	errorChan := make(chan error, options.Concurrency)
-	
-	// Start scanner goroutine
+
 	go func() {
 		defer close(itemChan)
 		err := c.scanTable(ctx, itemChan, options)
@@ -95,7 +90,6 @@ func (c *Cloner) CloneTable(ctx context.Context, options CloneOptions) error {
 		}
 	}()
 
-	// Start writer goroutines
 	var wg sync.WaitGroup
 	for i := 0; i < options.Concurrency; i++ {
 		wg.Add(1)
@@ -108,13 +102,11 @@ func (c *Cloner) CloneTable(ctx context.Context, options CloneOptions) error {
 		}()
 	}
 
-	// Wait for all writers to complete
 	go func() {
 		wg.Wait()
 		close(errorChan)
 	}()
 
-	// Check for errors
 	for err := range errorChan {
 		if err != nil {
 			return err
@@ -124,27 +116,23 @@ func (c *Cloner) CloneTable(ctx context.Context, options CloneOptions) error {
 	return nil
 }
 
-// scanTable scans the source table and sends items to the channel
 func (c *Cloner) scanTable(ctx context.Context, itemChan chan<- map[string]types.AttributeValue, options CloneOptions) error {
 	input := &dynamodb.ScanInput{
 		TableName: aws.String(c.SourceConfig.TableName),
 	}
 
-	// Add filter expression if provided
 	if options.FilterExpression != nil {
 		input.FilterExpression = options.FilterExpression
 		input.ExpressionAttributeNames = options.ExpressionAttributeNames
 		input.ExpressionAttributeValues = options.ExpressionAttributeValues
 	}
 
-	// Use parallel scan if no filter is applied (more efficient for full table scans)
 	if options.FilterExpression == nil {
 		return c.parallelScan(ctx, itemChan, input, options.Concurrency)
 	}
 
-	// Sequential scan with filter
 	paginator := dynamodb.NewScanPaginator(c.SourceClient, input)
-	
+
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
@@ -163,7 +151,6 @@ func (c *Cloner) scanTable(ctx context.Context, itemChan chan<- map[string]types
 	return nil
 }
 
-// parallelScan performs parallel scanning for better performance on large tables
 func (c *Cloner) parallelScan(ctx context.Context, itemChan chan<- map[string]types.AttributeValue, baseInput *dynamodb.ScanInput, segments int) error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, segments)
@@ -172,13 +159,13 @@ func (c *Cloner) parallelScan(ctx context.Context, itemChan chan<- map[string]ty
 		wg.Add(1)
 		go func(seg int) {
 			defer wg.Done()
-			
+
 			input := *baseInput
 			input.Segment = aws.Int32(int32(seg))
 			input.TotalSegments = aws.Int32(int32(segments))
 
 			paginator := dynamodb.NewScanPaginator(c.SourceClient, &input)
-			
+
 			for paginator.HasMorePages() {
 				page, err := paginator.NextPage(ctx)
 				if err != nil {
@@ -201,7 +188,6 @@ func (c *Cloner) parallelScan(ctx context.Context, itemChan chan<- map[string]ty
 	wg.Wait()
 	close(errChan)
 
-	// Check for errors
 	for err := range errChan {
 		if err != nil {
 			return err
@@ -211,7 +197,6 @@ func (c *Cloner) parallelScan(ctx context.Context, itemChan chan<- map[string]ty
 	return nil
 }
 
-// writeItems batches items and writes them to the destination table
 func (c *Cloner) writeItems(ctx context.Context, itemChan <-chan map[string]types.AttributeValue, batchSize int) error {
 	batch := make([]types.WriteRequest, 0, batchSize)
 
@@ -230,7 +215,6 @@ func (c *Cloner) writeItems(ctx context.Context, itemChan <-chan map[string]type
 		}
 	}
 
-	// Write remaining items
 	if len(batch) > 0 {
 		return c.writeBatch(ctx, batch)
 	}
@@ -238,7 +222,6 @@ func (c *Cloner) writeItems(ctx context.Context, itemChan <-chan map[string]type
 	return nil
 }
 
-// writeBatch writes a batch of items with retry logic for unprocessed items
 func (c *Cloner) writeBatch(ctx context.Context, batch []types.WriteRequest) error {
 	input := &dynamodb.BatchWriteItemInput{
 		RequestItems: map[string][]types.WriteRequest{
@@ -255,16 +238,13 @@ func (c *Cloner) writeBatch(ctx context.Context, batch []types.WriteRequest) err
 			return fmt.Errorf("failed to write batch: %w", err)
 		}
 
-		// Check for unprocessed items
 		unprocessed := result.UnprocessedItems[c.DestConfig.TableName]
 		if len(unprocessed) == 0 {
 			return nil
 		}
 
-		// Retry with unprocessed items
 		input.RequestItems[c.DestConfig.TableName] = unprocessed
-		
-		// Exponential backoff
+
 		time.Sleep(backoff)
 		backoff *= 2
 	}
@@ -272,7 +252,6 @@ func (c *Cloner) writeBatch(ctx context.Context, batch []types.WriteRequest) err
 	return fmt.Errorf("failed to write batch after %d retries", maxRetries)
 }
 
-// GetItemCount returns the number of items in the source table
 func (c *Cloner) GetItemCount(ctx context.Context, filterExpression *string) (int64, error) {
 	input := &dynamodb.ScanInput{
 		TableName: aws.String(c.SourceConfig.TableName),
@@ -297,9 +276,7 @@ func (c *Cloner) GetItemCount(ctx context.Context, filterExpression *string) (in
 	return totalCount, nil
 }
 
-// CloneTableStructure creates the destination table with the same structure as source
 func (c *Cloner) CloneTableStructure(ctx context.Context) error {
-	// Describe source table
 	describeInput := &dynamodb.DescribeTableInput{
 		TableName: aws.String(c.SourceConfig.TableName),
 	}
@@ -311,15 +288,13 @@ func (c *Cloner) CloneTableStructure(ctx context.Context) error {
 
 	table := result.Table
 
-	// Create destination table
 	createInput := &dynamodb.CreateTableInput{
-		TableName:              aws.String(c.DestConfig.TableName),
-		KeySchema:              table.KeySchema,
-		AttributeDefinitions:   table.AttributeDefinitions,
-		BillingMode:           types.BillingModePayPerRequest, // Use on-demand for simplicity
+		TableName:            aws.String(c.DestConfig.TableName),
+		KeySchema:            table.KeySchema,
+		AttributeDefinitions: table.AttributeDefinitions,
+		BillingMode:          types.BillingModePayPerRequest,
 	}
 
-	// Add GSIs if they exist
 	if len(table.GlobalSecondaryIndexes) > 0 {
 		createInput.GlobalSecondaryIndexes = make([]types.GlobalSecondaryIndex, len(table.GlobalSecondaryIndexes))
 		for i, gsi := range table.GlobalSecondaryIndexes {
@@ -331,7 +306,6 @@ func (c *Cloner) CloneTableStructure(ctx context.Context) error {
 		}
 	}
 
-	// Add LSIs if they exist
 	if len(table.LocalSecondaryIndexes) > 0 {
 		createInput.LocalSecondaryIndexes = make([]types.LocalSecondaryIndex, len(table.LocalSecondaryIndexes))
 		for i, lsi := range table.LocalSecondaryIndexes {
@@ -348,9 +322,9 @@ func (c *Cloner) CloneTableStructure(ctx context.Context) error {
 		return fmt.Errorf("failed to create destination table: %w", err)
 	}
 
-	// Wait for table to be active
 	waiter := dynamodb.NewTableExistsWaiter(c.DestClient)
 	return waiter.Wait(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(c.DestConfig.TableName),
 	}, 5*time.Minute)
 }
+

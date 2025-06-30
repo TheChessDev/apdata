@@ -21,7 +21,6 @@ type ConnectionString struct {
 }
 
 func ParseConnectionString(connStr string) (*ConnectionString, error) {
-	// Expected format: client/env (e.g., "acme/prod", "acme/staging")
 	parts := []string{}
 	for i, char := range connStr {
 		if char == '/' {
@@ -30,7 +29,7 @@ func ParseConnectionString(connStr string) (*ConnectionString, error) {
 			break
 		}
 	}
-	
+
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid connection string format: %s (expected client/env)", connStr)
 	}
@@ -43,7 +42,7 @@ func ParseConnectionString(connStr string) (*ConnectionString, error) {
 
 func LoadConfig() (*Config, error) {
 	configPath := getConfigPath()
-	
+
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		return createDefaultConfig(configPath)
 	}
@@ -63,8 +62,7 @@ func LoadConfig() (*Config, error) {
 
 func (c *Config) SaveConfig() error {
 	configPath := getConfigPath()
-	
-	// Create config directory if it doesn't exist
+
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
@@ -138,17 +136,15 @@ func createDefaultConfig(configPath string) (*Config, error) {
 			"example/local": {
 				Region:    "us-east-1",
 				TableName: "test-table",
-				Endpoint:  "http://localhost:8000", // Local DynamoDB
+				Endpoint:  "http://localhost:8000",
 			},
 		},
 	}
 
-	// Create config directory
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// Save default config
 	if err := config.SaveConfig(); err != nil {
 		return nil, fmt.Errorf("failed to save default config: %w", err)
 	}
@@ -159,17 +155,17 @@ func createDefaultConfig(configPath string) (*Config, error) {
 	return config, nil
 }
 
-// GetConfiguredConnections returns all configured connection strings
 func (c *Config) GetConfiguredConnections() ([]string, []string) {
 	var mysql, dynamodb []string
-	
+
 	for key := range c.MySQL {
 		mysql = append(mysql, key)
 	}
-	
+
 	for key := range c.DynamoDB {
 		dynamodb = append(dynamodb, key)
 	}
-	
+
 	return mysql, dynamodb
 }
+

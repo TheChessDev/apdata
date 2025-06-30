@@ -30,9 +30,7 @@ func NewCloner(source, dest Config) *Cloner {
 	}
 }
 
-// CloneSchema exports and imports database schema without data
 func (c *Cloner) CloneSchema() error {
-	// Export schema without data
 	cmd := exec.Command("mysqldump",
 		"--no-data",
 		"--skip-add-drop-table",
@@ -58,11 +56,9 @@ func (c *Cloner) CloneSchema() error {
 		return fmt.Errorf("failed to export schema: %w", err)
 	}
 
-	// Import schema to destination
 	return c.importSQL(schemaFile)
 }
 
-// CloneData exports and imports data for specific tables or all tables
 func (c *Cloner) CloneData(tables []string) error {
 	if len(tables) == 0 {
 		var err error
@@ -72,7 +68,6 @@ func (c *Cloner) CloneData(tables []string) error {
 		}
 	}
 
-	// Sort tables by dependency order (simplified - could be enhanced)
 	orderedTables := c.sortTablesByDependency(tables)
 
 	for _, table := range orderedTables {
@@ -84,9 +79,7 @@ func (c *Cloner) CloneData(tables []string) error {
 	return nil
 }
 
-// CloneTable clones a specific table with optimized settings
 func (c *Cloner) cloneTable(table string) error {
-	// Export table data
 	cmd := exec.Command("mysqldump",
 		"--no-create-info",
 		"--skip-disable-keys",
@@ -113,11 +106,9 @@ func (c *Cloner) cloneTable(table string) error {
 		return fmt.Errorf("failed to export table data: %w", err)
 	}
 
-	// Import with FK checks disabled
 	return c.importTableData(dataFile)
 }
 
-// CloneWithFilter clones data with custom WHERE conditions
 func (c *Cloner) CloneWithFilter(table, whereClause string) error {
 	sourceDB, err := c.connectSource()
 	if err != nil {
@@ -131,32 +122,27 @@ func (c *Cloner) CloneWithFilter(table, whereClause string) error {
 	}
 	defer destDB.Close()
 
-	// Get table structure
 	columns, err := c.getTableColumns(sourceDB, table)
 	if err != nil {
 		return err
 	}
 
-	// Build query
 	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(columns, ", "), table)
 	if whereClause != "" {
 		query += " WHERE " + whereClause
 	}
 
-	// Execute query and insert in batches
 	rows, err := sourceDB.Query(query)
 	if err != nil {
 		return fmt.Errorf("failed to query source: %w", err)
 	}
 	defer rows.Close()
 
-	// Prepare insert statement
 	placeholders := strings.Repeat("?,", len(columns))
 	placeholders = placeholders[:len(placeholders)-1]
 	insertQuery := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
 		table, strings.Join(columns, ", "), placeholders)
 
-	// Disable FK checks for destination
 	if _, err := destDB.Exec("SET FOREIGN_KEY_CHECKS=0"); err != nil {
 		return fmt.Errorf("failed to disable FK checks: %w", err)
 	}
@@ -168,10 +154,9 @@ func (c *Cloner) CloneWithFilter(table, whereClause string) error {
 	}
 	defer stmt.Close()
 
-	// Process rows in batches
 	batchSize := 1000
 	batch := make([][]interface{}, 0, batchSize)
-	
+
 	for rows.Next() {
 		values := make([]interface{}, len(columns))
 		valuePtrs := make([]interface{}, len(columns))
@@ -193,7 +178,6 @@ func (c *Cloner) CloneWithFilter(table, whereClause string) error {
 		}
 	}
 
-	// Insert remaining batch
 	if len(batch) > 0 {
 		return c.insertBatch(stmt, batch)
 	}
@@ -233,18 +217,17 @@ func (c *Cloner) importSQL(filename string) error {
 }
 
 func (c *Cloner) importTableData(filename string) error {
-	// Create temporary file with FK checks disabled
 	tempFile := filename + ".temp"
 	content := "SET FOREIGN_KEY_CHECKS=0;\n"
-	
+
 	originalContent, err := os.ReadFile(filename)
 	if err != nil {
 		return err
 	}
-	
+
 	content += string(originalContent)
 	content += "\nSET FOREIGN_KEY_CHECKS=1;\n"
-	
+
 	if err := os.WriteFile(tempFile, []byte(content), 0644); err != nil {
 		return err
 	}
@@ -298,8 +281,6 @@ func (c *Cloner) getTableColumns(db *sql.DB, table string) ([]string, error) {
 }
 
 func (c *Cloner) sortTablesByDependency(tables []string) []string {
-	// Simplified implementation - in production, you'd want to analyze FK relationships
-	// For now, just return the original order
 	return tables
 }
 
@@ -311,3 +292,4 @@ func (c *Cloner) insertBatch(stmt *sql.Stmt, batch [][]interface{}) error {
 	}
 	return nil
 }
+

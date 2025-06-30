@@ -1,4 +1,3 @@
-// cmd/clone.go
 package cmd
 
 import (
@@ -24,7 +23,7 @@ var cloneCmd = &cobra.Command{
 
 func runClone(cmd *cobra.Command, args []string) error {
 	cloneType := args[0]
-	
+
 	source, _ := cmd.Flags().GetString("source")
 	dest, _ := cmd.Flags().GetString("dest")
 	table, _ := cmd.Flags().GetString("table")
@@ -48,9 +47,9 @@ func runClone(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	internal.Logger.Info("Starting clone operation", 
-		"type", cloneType, 
-		"source", source, 
+	internal.Logger.Info("Starting clone operation",
+		"type", cloneType,
+		"source", source,
 		"dest", dest,
 		"table", table)
 
@@ -97,7 +96,6 @@ func cloneMySQLData(cfg *config.Config, source, dest, table, whereClause string,
 		internal.Logger.Info("MySQL clone completed", "duration", time.Since(start))
 	}()
 
-	// Clone schema unless data-only is specified
 	if !dataOnly {
 		internal.Logger.Info("Cloning MySQL schema")
 		if err := cloner.CloneSchema(); err != nil {
@@ -105,22 +103,18 @@ func cloneMySQLData(cfg *config.Config, source, dest, table, whereClause string,
 		}
 	}
 
-	// Clone data unless schema-only is specified
 	if !schemaOnly {
 		internal.Logger.Info("Cloning MySQL data")
-		
+
 		if whereClause != "" && table != "" {
-			// Clone specific table with filter
 			if err := cloner.CloneWithFilter(table, whereClause); err != nil {
 				return fmt.Errorf("failed to clone table with filter: %w", err)
 			}
 		} else if table != "" {
-			// Clone specific table
 			if err := cloner.CloneData([]string{table}); err != nil {
 				return fmt.Errorf("failed to clone table: %w", err)
 			}
 		} else {
-			// Clone all tables
 			if err := cloner.CloneData(nil); err != nil {
 				return fmt.Errorf("failed to clone data: %w", err)
 			}
@@ -151,7 +145,6 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, filter string, c
 		return fmt.Errorf("failed to get destination DynamoDB config: %w", err)
 	}
 
-	// Override table name if provided
 	if table != "" {
 		sourceConfig.TableName = table
 		destConfig.TableName = table
@@ -169,14 +162,11 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, filter string, c
 
 	ctx := context.Background()
 
-	// Clone table structure first
 	internal.Logger.Info("Cloning DynamoDB table structure")
 	if err := cloner.CloneTableStructure(ctx); err != nil {
-		// Table might already exist, log but continue
 		internal.Logger.Warn("Failed to clone table structure (table might already exist)", "error", err)
 	}
 
-	// Prepare clone options
 	options := dynamodb.CloneOptions{
 		Concurrency: concurrency,
 		BatchSize:   25,
@@ -184,13 +174,11 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, filter string, c
 
 	if filter != "" {
 		options.FilterExpression = &filter
-		// Parse filter expression attributes if needed
 		if strings.Contains(filter, ":") || strings.Contains(filter, "#") {
 			internal.Logger.Warn("Filter expression contains attribute names/values. Please ensure they are properly configured.")
 		}
 	}
 
-	// Get item count for progress tracking
 	count, err := cloner.GetItemCount(ctx, options.FilterExpression)
 	if err != nil {
 		internal.Logger.Warn("Failed to get item count", "error", err)
@@ -198,7 +186,6 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, filter string, c
 		internal.Logger.Info("Cloning DynamoDB data", "itemCount", count)
 	}
 
-	// Clone data
 	if err := cloner.CloneTable(ctx, options); err != nil {
 		return fmt.Errorf("failed to clone DynamoDB table: %w", err)
 	}
@@ -208,14 +195,12 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, filter string, c
 
 func init() {
 	rootCmd.AddCommand(cloneCmd)
-	
-	// Required flags
+
 	cloneCmd.Flags().String("source", "", "Source in format client/env (required)")
 	cloneCmd.Flags().String("dest", "", "Destination in format client/env (required)")
 	cloneCmd.MarkFlagRequired("source")
 	cloneCmd.MarkFlagRequired("dest")
-	
-	// Optional flags
+
 	cloneCmd.Flags().String("table", "", "Optional table name")
 	cloneCmd.Flags().String("filter", "", "Optional filter expression for DynamoDB")
 	cloneCmd.Flags().String("where", "", "Optional WHERE clause for MySQL")
