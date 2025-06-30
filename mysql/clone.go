@@ -42,14 +42,9 @@ func NewCloner(source, dest Config) *Cloner {
 }
 
 func (c *Cloner) CloneSchema() error {
-	return c.CloneSchemaWithOptions(false)
-}
-
-func (c *Cloner) CloneSchemaWithOptions(dropFirst bool) error {
-	if dropFirst {
-		if err := c.recreateDatabase(); err != nil {
-			return fmt.Errorf("failed to recreate database: %w", err)
-		}
+	// Always recreate database first to ensure clean import
+	if err := c.recreateDatabase(); err != nil {
+		return fmt.Errorf("failed to recreate database: %w", err)
 	}
 
 	args := []string{

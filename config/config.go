@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"apdata/dynamodb"
 	"apdata/mysql"
@@ -21,16 +22,13 @@ type ConnectionString struct {
 }
 
 func ParseConnectionString(connStr string) (*ConnectionString, error) {
-	parts := []string{}
-	for i, char := range connStr {
-		if char == '/' {
-			parts = append(parts, connStr[:i])
-			parts = append(parts, connStr[i+1:])
-			break
-		}
-	}
+	parts := strings.Split(connStr, "/")
 
 	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid connection string format: %s (expected client/env)", connStr)
+	}
+	
+	if parts[0] == "" || parts[1] == "" {
 		return nil, fmt.Errorf("invalid connection string format: %s (expected client/env)", connStr)
 	}
 
