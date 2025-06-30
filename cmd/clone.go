@@ -3,10 +3,12 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"apdata/config"
 	"apdata/dynamodb"
@@ -72,6 +74,11 @@ func runClone(cmd *cobra.Command, args []string) error {
 	// Validate component-name flag usage - only allow with DynamoDB
 	if componentName != "" && cloneType == "mysql" {
 		return fmt.Errorf("--component-name flag is only supported for DynamoDB. For MySQL, use --table for specific tables or omit for all tables")
+	}
+
+	// Validate filter flag usage - only allow with DynamoDB
+	if filter != "" && cloneType == "mysql" {
+		return fmt.Errorf("--filter flag is only supported for DynamoDB. For MySQL, use --where for filtering records")
 	}
 
 	cfg, err := config.LoadConfig()
@@ -172,24 +179,7 @@ func cloneMySQLData(cfg *config.Config, source, dest, table, whereClause string,
 		internal.Logger.Info("MySQL clone completed", "duration", time.Since(start))
 	}()
 
-	// Check if we should do prefix-based cloning
-	sourcePrefix := fmt.Sprintf("%s_%s", sourceConn.Client, sourceConn.Env)
-	destPrefix := fmt.Sprintf("%s_%s", destConn.Client, destConn.Env)
-	
-	// If no specific table is provided, use prefix-based cloning
-	if table == "" {
-		internal.Logger.Debug("Starting prefix-based MySQL clone", 
-			"source_prefix", sourcePrefix, 
-			"dest_prefix", destPrefix)
-		
-		if err := cloner.CloneTablesWithPrefix(sourcePrefix, destPrefix, schemaOnly, dataOnly); err != nil {
-			return fmt.Errorf("failed to clone MySQL tables with prefix: %w", err)
-		}
-		
-		return nil
-	}
-
-	// Single table or full database cloning (existing behavior)
+	// MySQL clones exact table names without any prefix logic
 	if !dataOnly {
 		internal.Logger.Info("Cloning MySQL schema")
 		if err := cloner.CloneSchema(); err != nil {
@@ -275,9 +265,22 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, componentName, f
 	}
 
 	if filter != "" {
-		options.FilterExpression = &filter
-		if strings.Contains(filter, ":") || strings.Contains(filter, "#") {
-			internal.Logger.Warn("Filter expression contains attribute names/values. Please ensure they are properly configured.")
+		// Process the filter expression and automatically bind simple values
+		processedFilter, attributeValues, err := processFilterExpression(filter)
+		if err != nil {
+			internal.Logger.Warn("Filter expression processing warning", "filter", filter, "error", err)
+			// Fall back to original filter
+			options.FilterExpression = &filter
+		} else {
+			options.FilterExpression = &processedFilter
+			if len(attributeValues) > 0 {
+				options.ExpressionAttributeValues = attributeValues
+				internal.Logger.Debug("Auto-bound filter values", "filter", processedFilter, "values", attributeValues)
+			}
+		}
+		
+		if strings.Contains(filter, "#") {
+			internal.Logger.Warn("Filter expression contains attribute names (#). Please ensure they are properly configured.")
 		}
 	}
 
@@ -295,6 +298,70 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, componentName, f
 	return nil
 }
 
+// processFilterExpression automatically processes simple filter expressions and binds values
+func processFilterExpression(filter string) (string, map[string]types.AttributeValue, error) {
+	
+	// Handle common patterns like: AttributeName = 'value' or AttributeName = "value"
+	// Convert to: AttributeName = :attrX format with bound values
+	
+	attributeValues := make(map[string]types.AttributeValue)
+	processedFilter := filter
+	valueCounter := 1
+	
+	// Pattern: AttributeName = 'value' or AttributeName = "value"
+	patterns := []struct {
+		regex   string
+		handler func(matches []string) (string, types.AttributeValue)
+	}{
+		{
+			// Pattern: word = 'string_value'
+			regex: `(\w+)\s*=\s*'([^']*)'`,
+			handler: func(matches []string) (string, types.AttributeValue) {
+				return matches[2], &types.AttributeValueMemberS{Value: matches[2]}
+			},
+		},
+		{
+			// Pattern: word = "string_value"
+			regex: `(\w+)\s*=\s*"([^"]*)"`,
+			handler: func(matches []string) (string, types.AttributeValue) {
+				return matches[2], &types.AttributeValueMemberS{Value: matches[2]}
+			},
+		},
+		{
+			// Pattern: word = number
+			regex: `(\w+)\s*=\s*(\d+(?:\.\d+)?)`,
+			handler: func(matches []string) (string, types.AttributeValue) {
+				return matches[2], &types.AttributeValueMemberN{Value: matches[2]}
+			},
+		},
+	}
+	
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern.regex)
+		matches := re.FindAllStringSubmatch(processedFilter, -1)
+		
+		for _, match := range matches {
+			if len(match) >= 3 {
+				attributeName := match[1]
+				_, attributeValue := pattern.handler(match)
+				
+				// Create a parameter name
+				paramName := fmt.Sprintf(":val%d", valueCounter)
+				attributeValues[paramName] = attributeValue
+				
+				// Replace in the filter
+				originalExpression := match[0]
+				newExpression := fmt.Sprintf("%s = %s", attributeName, paramName)
+				processedFilter = strings.Replace(processedFilter, originalExpression, newExpression, 1)
+				
+				valueCounter++
+			}
+		}
+	}
+	
+	return processedFilter, attributeValues, nil
+}
+
 func init() {
 	rootCmd.AddCommand(cloneCmd)
 
@@ -305,8 +372,8 @@ func init() {
 
 	cloneCmd.Flags().String("table", "", "Optional table name (MySQL only)")
 	cloneCmd.Flags().String("component-name", "", "Optional component name for prefix-based cloning (DynamoDB only, e.g., connectors-data-api)")
-	cloneCmd.Flags().String("filter", "", "Optional filter expression for DynamoDB")
-	cloneCmd.Flags().String("where", "", "Optional WHERE clause for MySQL")
+	cloneCmd.Flags().String("filter", "", "Optional filter expression (DynamoDB only, e.g., \"DocumentType = 'CatalogStyle'\")")
+	cloneCmd.Flags().String("where", "", "Optional WHERE clause (MySQL only, e.g., \"created_at > '2024-01-01'\")")
 	cloneCmd.Flags().Bool("schema-only", false, "Clone schema only (MySQL)")
 	cloneCmd.Flags().Bool("data-only", false, "Clone data only (MySQL)")
 	cloneCmd.Flags().Int("concurrency", 25, "Number of concurrent workers for DynamoDB")

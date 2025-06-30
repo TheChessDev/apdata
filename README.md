@@ -152,7 +152,7 @@ To add your own configurations, edit `~/.apdata/config.json` and add entries fol
 ### Basic Commands
 
 ```bash
-# Clone MySQL data with prefix-based table discovery
+# Clone entire MySQL database (all tables with exact names)
 ./apdata clone mysql --source acme/dev --dest my-client/dev
 
 # Clone DynamoDB data with prefix-based table discovery
@@ -161,23 +161,41 @@ To add your own configurations, edit `~/.apdata/config.json` and add entries fol
 # Clone DynamoDB data for a specific component with interactive selection
 ./apdata clone dynamodb --source acme/dev --dest my-client/dev --component-name my-service --interactive
 
-# Clone both MySQL and DynamoDB with prefix mapping
+# Clone both databases (MySQL: exact names, DynamoDB: prefix-based)
 ./apdata clone all --source acme/dev --dest my-client/dev
 ```
 
-### Prefix-Based Cloning
+### Database Cloning Approaches
 
-The tool automatically detects when you're cloning between different client/environment configurations and performs prefix-based cloning:
+The tool uses different cloning strategies for each database type:
 
-**MySQL**: Finds all tables starting with `client_environment_*` and clones them to `newclient_newenvironment_*`
+**MySQL**: Clones exact table names as they exist in the source database
+- Clones all tables in the database or specific tables with `--table`
+- No automatic prefix manipulation - copies tables with their exact names
+- Use different source/dest databases for isolation
 
-- Example: `acme_dev_users` → `my-client_dev_users`
-- Example: `acme_dev_orders` → `my-client_dev_orders`
-
-**DynamoDB**: Finds all tables starting with `client.environment.*` and clones them to `newclient.newenvironment.*`
-
+**DynamoDB**: Uses prefix-based discovery and cloning for multi-tenant table patterns
+- Finds all tables starting with `client.environment.*` and clones them to `newclient.newenvironment.*`
 - Example: `acme.dev.users` → `my-client.dev.users`
 - Example: `acme.dev.sessions` → `my-client.dev.sessions`
+
+### Filtering Records
+
+The tool supports different filtering approaches for each database type:
+
+**MySQL Filtering** (using `--where`):
+```bash
+# SQL-style WHERE clauses
+./apdata clone mysql --source acme/dev --dest my-client/dev --table users --where "created_at > '2024-01-01'"
+./apdata clone mysql --source acme/dev --dest my-client/dev --table orders --where "status = 'active' AND amount > 100"
+```
+
+**DynamoDB Filtering** (using `--filter`):
+```bash
+# DynamoDB FilterExpression syntax with automatic value binding
+./apdata clone dynamodb --source acme/dev --dest my-client/dev --filter "DocumentType = 'CatalogStyle'"
+./apdata clone dynamodb --source acme/dev --dest my-client/dev --filter "attribute_exists(active) AND Price > 50"
+```
 
 ### Component-Based Cloning with Interactive Selection
 
@@ -264,14 +282,19 @@ Use ↑/↓ to navigate, SPACE to select/deselect, ENTER to confirm
 
 ### Optional Flags
 
-- `--table`: Specific table name to clone (MySQL only)
-- `--component-name`: Component name for prefix-based cloning (DynamoDB only, e.g., connectors-data-api)
-- `--interactive`: Enable interactive checkbox selection when using --component-name (DynamoDB)
-- `--filter`: DynamoDB filter expression
-- `--where`: MySQL WHERE clause
-- `--schema-only`: Clone schema only (MySQL)
-- `--data-only`: Clone data only (MySQL)
-- `--concurrency`: Number of concurrent workers for DynamoDB (default: 25)
+#### MySQL-Specific Flags
+- `--table`: Specific table name to clone 
+- `--where`: WHERE clause for filtering records (e.g., `"created_at > '2024-01-01'"`)
+- `--schema-only`: Clone schema only
+- `--data-only`: Clone data only
+
+#### DynamoDB-Specific Flags  
+- `--component-name`: Component name for prefix-based cloning (e.g., `connectors-data-api`)
+- `--interactive`: Enable interactive checkbox selection when using --component-name
+- `--filter`: Filter expression for record filtering (e.g., `"DocumentType = 'CatalogStyle'"`)
+- `--concurrency`: Number of concurrent workers (default: 25)
+
+#### Global Flags
 - `--verbose`: Enable verbose logging
 
 ## Examples
@@ -296,7 +319,10 @@ Use ↑/↓ to navigate, SPACE to select/deselect, ENTER to confirm
 ./apdata clone dynamodb --source acme/prod --dest acme/local --component-name user-service --interactive
 
 # Clone active records only (connects to AWS DynamoDB)
-./apdata clone dynamodb --source acme/prod --dest acme/local --filter "attribute_exists(active) AND active = :true"
+./apdata clone dynamodb --source acme/prod --dest acme/local --filter "attribute_exists(active)"
+
+# Clone specific records by primary key
+./apdata clone dynamodb --source acme/prod --dest acme/local --filter "DocumentType = 'CatalogStyle'"
 
 # High-performance clone with increased concurrency
 ./apdata clone dynamodb --source acme/prod --dest acme/local --concurrency 50
@@ -311,14 +337,17 @@ Use ↑/↓ to navigate, SPACE to select/deselect, ENTER to confirm
 # Clone all acme.dev.* DynamoDB tables to my-client.dev.*
 ./apdata clone dynamodb --source acme/dev --dest my-client/dev --verbose
 
-# Clone all acme_dev_* MySQL tables to my-client_dev_*
+# Clone all MySQL tables with exact names
 ./apdata clone mysql --source acme/dev --dest my-client/dev --verbose
 
-# Clone both databases with prefix mapping
+# Clone both databases (MySQL: exact names, DynamoDB: prefix-based)
 ./apdata clone all --source acme/dev --dest my-client/dev --verbose
 
 # Apply filters during prefix-based cloning
 ./apdata clone dynamodb --source acme/dev --dest my-client/dev --filter "attribute_exists(active)"
+
+# Clone only specific records using primary key filter
+./apdata clone dynamodb --source acme/dev --dest my-client/dev --filter "DocumentType = 'CatalogStyle'"
 ```
 
 ### Multi-Database Examples
