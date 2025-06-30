@@ -110,9 +110,7 @@ func TestConfigMethods(t *testing.T) {
 
 	// Test DynamoDB config
 	dynamoConfig := dynamodb.Config{
-		Region:    "us-east-1",
-		TableName: "test-table",
-		Endpoint:  "http://localhost:8000",
+		Region: "us-east-1",
 	}
 	
 	config.SetDynamoDBConfig("test", "local", dynamoConfig)
@@ -192,9 +190,7 @@ func TestConfigSerialization(t *testing.T) {
 		},
 		DynamoDB: map[string]dynamodb.Config{
 			"test/local": {
-				Region:    "us-east-1",
-				TableName: "test-table",
-				Endpoint:  "http://localhost:8000",
+				Region: "us-east-1",
 			},
 		},
 	}
@@ -238,7 +234,7 @@ func TestConfigSerialization(t *testing.T) {
 		t.Errorf("Failed to get DynamoDB config: %v", err)
 	}
 
-	if dynamoConfig.Region != "us-east-1" || dynamoConfig.TableName != "test-table" {
+	if dynamoConfig.Region != "us-east-1" {
 		t.Error("DynamoDB config data was corrupted during serialization")
 	}
 }

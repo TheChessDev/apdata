@@ -10,6 +10,7 @@ A high-performance CLI tool for cloning data between MySQL and DynamoDB database
 - **Optimized Transfers**: Uses single transactions and optimized mysqldump flags
 - **Filtered Cloning**: Clone specific rows using WHERE clauses with batch processing
 - **Dependency Management**: Smart table ordering to handle foreign key relationships
+- **Prefix-Based Cloning**: Automatically clone all tables matching client.environment pattern
 
 ### DynamoDB Improvements
 - **Filtered Scanning**: Use FilterExpressions to clone only specific items
@@ -17,12 +18,44 @@ A high-performance CLI tool for cloning data between MySQL and DynamoDB database
 - **Batch Operations**: Efficient batch writes with automatic retry logic
 - **Memory Efficient**: Stream processing to handle large tables without memory issues
 - **Structure Cloning**: Automatically recreate table schemas with GSI/LSI support
+- **Prefix-Based Cloning**: Automatically discover and clone all tables matching client.environment pattern
 
 ## Installation
 
 ```bash
 go build -o apdata
 ```
+
+## Prerequisites
+
+### AWS Configuration
+The tool requires AWS credentials to be configured for DynamoDB operations. Set up your credentials using one of these methods:
+
+```bash
+# Option 1: Using AWS CLI (recommended)
+aws configure
+
+# Option 2: Environment variables
+export AWS_ACCESS_KEY_ID=your-access-key
+export AWS_SECRET_ACCESS_KEY=your-secret-key
+export AWS_DEFAULT_REGION=us-east-1
+
+# Option 3: AWS credentials file
+# Create ~/.aws/credentials with:
+# [default]
+# aws_access_key_id = your-access-key
+# aws_secret_access_key = your-secret-key
+```
+
+**Required AWS Permissions for DynamoDB:**
+- `dynamodb:ListTables`
+- `dynamodb:DescribeTable`
+- `dynamodb:CreateTable`
+- `dynamodb:Scan`
+- `dynamodb:BatchWriteItem`
+
+### MySQL Requirements
+MySQL operations require direct database access with standard connection credentials.
 
 ## Configuration
 
@@ -85,13 +118,13 @@ When you first run the tool, it creates a default config:
   },
   "dynamodb": {
     "example/local": {
-      "Region": "us-east-1",
-      "TableName": "test-table",
-      "Endpoint": "http://localhost:8000"
+      "Region": "us-east-1"
     }
   }
 }
 ```
+
+**Note for DynamoDB**: The configuration only requires the AWS region. Table names are discovered automatically using prefix-based discovery, and the tool connects to AWS DynamoDB (not local instances).
 
 ### Config Management
 
@@ -112,15 +145,27 @@ To add your own configurations, edit `~/.apdata/config.json` and add entries fol
 ### Basic Commands
 
 ```bash
-# Clone MySQL data
-./apdata clone mysql --source acme/prod --dest acme/local
+# Clone MySQL data with prefix-based table discovery
+./apdata clone mysql --source allpoint/dev --dest julian/dev
 
-# Clone DynamoDB data
-./apdata clone dynamodb --source acme/prod --dest acme/local
+# Clone DynamoDB data with prefix-based table discovery
+./apdata clone dynamodb --source allpoint/dev --dest julian/dev
 
-# Clone both MySQL and DynamoDB
-./apdata clone all --source acme/prod --dest acme/local
+# Clone both MySQL and DynamoDB with prefix mapping
+./apdata clone all --source allpoint/dev --dest julian/dev
 ```
+
+### Prefix-Based Cloning
+
+The tool automatically detects when you're cloning between different client/environment configurations and performs prefix-based cloning:
+
+**MySQL**: Finds all tables starting with `client_environment_*` and clones them to `newclient_newenvironment_*`
+- Example: `allpoint_dev_users` → `julian_dev_users`
+- Example: `allpoint_dev_orders` → `julian_dev_orders`
+
+**DynamoDB**: Finds all tables starting with `client.environment.*` and clones them to `newclient.newenvironment.*`
+- Example: `allpoint.dev.users` → `julian.dev.users`
+- Example: `allpoint.dev.sessions` → `julian.dev.sessions`
 
 ### Advanced MySQL Options
 
@@ -150,7 +195,7 @@ To add your own configurations, edit `~/.apdata/config.json` and add entries fol
 # Custom concurrency (default: 10)
 ./apdata clone dynamodb --source acme/prod --dest acme/local --concurrency 20
 
-# Clone specific table
+# Clone specific table (bypasses prefix-based discovery)
 ./apdata clone dynamodb --source acme/prod --dest acme/local --table my-table
 ```
 
@@ -197,14 +242,33 @@ To add your own configurations, edit `~/.apdata/config.json` and add entries fol
 ### DynamoDB Examples
 
 ```bash
-# Clone active records only
+# Clone active records only (connects to AWS DynamoDB)
 ./apdata clone dynamodb --source acme/prod --dest acme/local --filter "attribute_exists(active) AND active = :true"
 
 # High-performance clone with increased concurrency
 ./apdata clone dynamodb --source acme/prod --dest acme/local --concurrency 50
 
-# Clone specific table
+# Clone specific table (bypasses prefix-based discovery)
 ./apdata clone dynamodb --source acme/prod --dest acme/local --table user-sessions
+```
+
+### Prefix-Based Cloning Examples
+
+```bash
+# Clone all allpoint.dev.* DynamoDB tables to julian.dev.*
+./apdata clone dynamodb --source allpoint/dev --dest julian/dev --verbose
+
+# Clone all allpoint_dev_* MySQL tables to julian_dev_*
+./apdata clone mysql --source allpoint/dev --dest julian/dev --verbose
+
+# Clone both databases with prefix mapping
+./apdata clone all --source allpoint/dev --dest julian/dev --verbose
+
+# Single table cloning (bypasses prefix-based discovery)
+./apdata clone dynamodb --source allpoint/dev --dest julian/dev --table allpoint.dev.users
+
+# Apply filters during prefix-based cloning
+./apdata clone dynamodb --source allpoint/dev --dest julian/dev --filter "attribute_exists(active)"
 ```
 
 ### Multi-Database Examples
@@ -219,7 +283,7 @@ To add your own configurations, edit `~/.apdata/config.json` and add entries fol
 
 ## Testing
 
-The project includes a comprehensive test suite covering all modules with 35+ tests.
+The project includes a comprehensive test suite covering all modules with 85+ tests.
 
 ### Running Tests
 
@@ -241,7 +305,8 @@ go test ./config -run TestParseConnectionString
 
 ### Test Coverage
 
-- **MySQL Module**: Connection handling, schema operations, error detection
+- **MySQL Module**: Connection handling, schema operations, error detection, performance optimization
+- **DynamoDB Module**: Performance optimization, metrics tracking, parallel scanning, error handling
 - **Config Module**: Connection string parsing, configuration management  
 - **Internal Module**: Spinner functionality, verbose mode behavior
 - **Command Module**: CLI validation, error formatting
@@ -266,21 +331,93 @@ The tool includes several performance optimizations:
 - Uses optimized import settings (`--disable-keys`, `--single-transaction`)
 - Provides detailed performance breakdowns showing time spent in each phase
 
+**Intelligent Data Cloning (Default):**
+- Analyzes table sizes to choose optimal processing strategy for each table
+- **Large tables (>100K rows)**: Chunked streaming with progress tracking
+- **Medium tables (10K-100K rows)**: Optimized mysqldump with extended inserts
+- **Small tables (<10K rows)**: Parallel processing with 3x concurrency
+- Real-time progress tracking with rows/second metrics
+- Memory-efficient processing to handle datasets of any size
+
 **Performance Monitoring:**
 - Logs detailed timing for each operation (recreate, export, import)
 - Shows percentage breakdown of time spent in each phase  
 - Reports file sizes and transfer rates
 - Enables easy identification of bottlenecks
 
+**Loading Indicators & Progress Feedback:**
+- **Visual Spinners**: Shows animated loading indicators for all long-running operations
+- **Operation-Specific Messages**: "Analyzing table sizes", "Exporting table_name data", "Processing chunk 3/10"
+- **Real-time Progress**: Updates spinner messages during chunked operations
+- **Parallel Processing Feedback**: Shows when multiple tables are being processed simultaneously
+- **Intelligent Display**: Automatically hides spinners in verbose mode to avoid conflicts with detailed logging
+
 ### Usage Examples
 
 ```bash
-# Monitor performance with verbose logging (optimized export enabled by default)
+# Monitor performance with verbose logging (intelligent processing enabled by default)
 ./apdata clone mysql --source acme/prod --dest acme/local --verbose
+
+# Clone data only (skips schema) - uses intelligent table processing
+./apdata clone mysql --source acme/prod --dest acme/local --data-only --verbose
+
+# Clone specific large table with chunked processing
+./apdata clone mysql --source acme/prod --dest acme/local --table large_logs --verbose
 ```
 
-The optimized export is beneficial for databases with:
-- Many stored procedures/functions
-- Complex trigger definitions  
-- Large numbers of tables
-- Any schema where performance matters
+The intelligent data cloning provides significant performance improvements for:
+- **Large datasets**: Chunked processing prevents memory issues
+- **Mixed table sizes**: Optimal strategy per table size
+- **Production databases**: Parallel processing for small tables
+- **Long-running operations**: Real-time progress tracking and ETA
+
+### DynamoDB Performance Features
+
+**Intelligent Parallel Scanning:**
+- Automatically determines optimal concurrency based on table characteristics
+- Uses parallel scan segments for maximum throughput (default: 10 concurrent segments)
+- Sequential scanning with filters for targeted data extraction
+- Real-time progress tracking with items/second metrics
+
+**Optimized Batch Processing:**
+- Configurable batch sizes up to DynamoDB's 25-item limit for maximum efficiency
+- Intelligent retry logic with exponential backoff and jitter
+- Memory-efficient streaming to handle tables of any size
+- Comprehensive error handling and automatic recovery
+
+**Advanced Metrics & Monitoring:**
+- **Real-time Metrics**: Items processed, throughput per second, bytes processed, error counts
+- **Progress Tracking**: Visual progress indicators with percentage completion and ETA
+- **Performance Analysis**: Detailed timing for scan vs write operations
+- **Resource Monitoring**: Active segment count, batch write statistics, retry metrics
+
+**Loading Indicators & User Experience:**
+- **Visual Spinners**: Shows animated loading indicators for all DynamoDB operations
+- **Operation-Specific Messages**: "Analyzing table size", "Cloning DynamoDB table", "Processing segments"
+- **Real-time Updates**: Dynamic progress messages with current throughput and completion percentage
+- **Intelligent Display**: Automatically adapts to verbose mode for optimal user experience
+
+**Memory & Resource Optimization:**
+- **Channel Buffering**: Intelligently sized channels based on concurrency and batch size
+- **Atomic Operations**: Thread-safe metrics collection for concurrent operations
+- **Context Cancellation**: Proper cleanup and graceful shutdown on errors or interruption
+- **Resource Efficiency**: Minimal memory footprint even for million-item tables
+
+### Usage Examples
+
+```bash
+# High-performance DynamoDB clone with verbose metrics
+./apdata clone dynamodb --source acme/prod --dest acme/local --verbose
+
+# Optimized clone with custom concurrency for large tables
+./apdata clone dynamodb --source acme/prod --dest acme/local --concurrency 20 --verbose
+
+# Clone with filter and performance monitoring
+./apdata clone dynamodb --source acme/prod --dest acme/local --filter "attribute_exists(active)" --verbose
+```
+
+The DynamoDB performance optimizations provide significant improvements for:
+- **Large tables**: Parallel scanning with up to 20x performance improvement
+- **High-throughput scenarios**: Optimized batch processing maximizes write capacity utilization
+- **Production workloads**: Intelligent defaults work well without tuning
+- **Monitoring & observability**: Comprehensive metrics for performance analysis

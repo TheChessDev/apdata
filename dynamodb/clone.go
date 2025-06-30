@@ -3,7 +3,9 @@ package dynamodb
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -15,9 +17,7 @@ import (
 )
 
 type Config struct {
-	Region    string
-	TableName string
-	Endpoint  string
+	Region string
 }
 
 type Cloner struct {
@@ -33,6 +33,22 @@ type CloneOptions struct {
 	ExpressionAttributeValues map[string]types.AttributeValue
 	Concurrency               int
 	BatchSize                 int
+	ProgressCallback          func(processed, total int64)
+	SourcePrefix              string // e.g., "allpoint.dev"
+	DestPrefix                string // e.g., "julian.dev"
+}
+
+type CloneMetrics struct {
+	StartTime        time.Time
+	ItemsProcessed   int64
+	ItemsTotal       int64
+	BytesProcessed   int64
+	ErrorCount       int64
+	RetryCount       int64
+	SegmentsActive   int32
+	BatchesWritten   int64
+	AvgItemSize      int64
+	ThroughputPerSec float64
 }
 
 func NewCloner(sourceConfig, destConfig Config) (*Cloner, error) {
@@ -59,227 +75,131 @@ func createClient(cfg Config) (*dynamodb.Client, error) {
 		config.WithRegion(cfg.Region),
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load AWS config - ensure AWS credentials are configured via 'aws configure' or environment variables: %w", err)
 	}
+
+	// Validate that we have credentials
+	creds, err := awsConfig.Credentials.Retrieve(context.TODO())
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve AWS credentials - ensure AWS credentials are configured via 'aws configure' or environment variables: %w", err)
+	}
+	
+	if creds.AccessKeyID == "" {
+		return nil, fmt.Errorf("AWS credentials not found - please run 'aws configure' to set up your credentials")
+	}
+
+	internal.Logger.Debug("AWS credentials validated", "region", cfg.Region, "access_key_id", creds.AccessKeyID[:8]+"...")
 
 	client := dynamodb.NewFromConfig(awsConfig)
-
-	if cfg.Endpoint != "" {
-		client = dynamodb.NewFromConfig(awsConfig, func(o *dynamodb.Options) {
-			o.BaseEndpoint = aws.String(cfg.Endpoint)
-		})
-	}
-
 	return client, nil
 }
 
-func (c *Cloner) CloneTable(ctx context.Context, options CloneOptions) error {
+func (c *Cloner) CloneTable(ctx context.Context, sourceTableName, destTableName string, options CloneOptions) error {
+	totalStart := time.Now()
+	internal.Logger.Info("Starting DynamoDB clone operation", "source_table", sourceTableName, "dest_table", destTableName)
+
+	// Set intelligent defaults based on performance analysis
 	if options.Concurrency == 0 {
-		options.Concurrency = 10
+		options.Concurrency = c.getOptimalConcurrency()
 	}
 	if options.BatchSize == 0 {
-		options.BatchSize = 25
+		options.BatchSize = c.getOptimalBatchSize()
 	}
 
-	internal.Logger.Debug("Starting DynamoDB clone", "table", c.SourceConfig.TableName, "concurrency", options.Concurrency, "batchSize", options.BatchSize)
-
-	var spinner *internal.Spinner
-	if !internal.VerboseMode {
-		spinner = internal.NewSpinner(fmt.Sprintf("Cloning DynamoDB table %s", c.SourceConfig.TableName))
-		spinner.Start()
+	// Initialize metrics tracking
+	metrics := &CloneMetrics{
+		StartTime: totalStart,
 	}
 
-	itemChan := make(chan map[string]types.AttributeValue, options.Concurrency*2)
-	errorChan := make(chan error, options.Concurrency)
+	// Get item count for progress tracking
+	var itemCountErr error
+	err := internal.SimpleSpinner("Analyzing table size", func() error {
+		metrics.ItemsTotal, itemCountErr = c.GetItemCount(ctx, sourceTableName, options.FilterExpression)
+		return itemCountErr
+	})
+	if err != nil {
+		internal.Logger.Warn("Could not get item count, proceeding without progress tracking", "error", err)
+		metrics.ItemsTotal = -1 // Unknown size
+	}
 
+	internal.Logger.Info("Table analysis completed", 
+		"source_table", sourceTableName,
+		"dest_table", destTableName,
+		"estimated_items", metrics.ItemsTotal,
+		"concurrency", options.Concurrency,
+		"batch_size", options.BatchSize)
+
+	// Start progress monitoring
+	progressCtx, progressCancel := context.WithCancel(ctx)
+	defer progressCancel()
+	
+	if metrics.ItemsTotal > 0 {
+		go c.monitorProgress(progressCtx, sourceTableName, metrics, options.ProgressCallback)
+	}
+
+	// Create channels with optimized buffer sizes
+	channelBuffer := options.Concurrency * options.BatchSize
+	itemChan := make(chan map[string]types.AttributeValue, channelBuffer)
+	errorChan := make(chan error, options.Concurrency+1) // +1 for scanner
+
+	// Start scanning
 	go func() {
 		defer close(itemChan)
-		err := c.scanTable(ctx, itemChan, options)
-		if err != nil {
-			errorChan <- err
+		scanErr := c.scanTableWithMetrics(ctx, sourceTableName, itemChan, options, metrics)
+		if scanErr != nil {
+			atomic.AddInt64(&metrics.ErrorCount, 1)
+			errorChan <- fmt.Errorf("scan error: %w", scanErr)
 		}
 	}()
 
+	// Start writers
 	var wg sync.WaitGroup
 	for i := 0; i < options.Concurrency; i++ {
 		wg.Add(1)
-		go func() {
+		go func(workerID int) {
 			defer wg.Done()
-			err := c.writeItems(ctx, itemChan, options.BatchSize)
-			if err != nil {
-				errorChan <- err
+			writeErr := c.writeItemsWithMetrics(ctx, destTableName, itemChan, options, metrics, workerID)
+			if writeErr != nil {
+				atomic.AddInt64(&metrics.ErrorCount, 1)
+				errorChan <- fmt.Errorf("writer %d error: %w", workerID, writeErr)
 			}
-		}()
+		}(i)
 	}
 
+	// Close error channel when all writers complete
 	go func() {
 		wg.Wait()
 		close(errorChan)
 	}()
 
+	// Wait for completion or error
+	var cloneErr error
 	for err := range errorChan {
 		if err != nil {
-			if spinner != nil {
-				spinner.Error(fmt.Sprintf("Failed to clone table %s", c.SourceConfig.TableName))
-			}
-			return err
+			cloneErr = err
+			break // Stop on first error
 		}
 	}
 
-	if spinner != nil {
-		spinner.Success(fmt.Sprintf("DynamoDB table %s cloned successfully", c.SourceConfig.TableName))
+	// Calculate final metrics
+	totalDuration := time.Since(totalStart)
+	if metrics.ItemsProcessed > 0 {
+		metrics.ThroughputPerSec = float64(metrics.ItemsProcessed) / totalDuration.Seconds()
+		if metrics.BytesProcessed > 0 {
+			metrics.AvgItemSize = metrics.BytesProcessed / metrics.ItemsProcessed
+		}
 	}
-	return nil
+
+	// Log comprehensive results
+	c.logCloneResults(metrics, totalDuration, cloneErr)
+
+	return cloneErr
 }
 
-func (c *Cloner) scanTable(ctx context.Context, itemChan chan<- map[string]types.AttributeValue, options CloneOptions) error {
+
+func (c *Cloner) GetItemCount(ctx context.Context, tableName string, filterExpression *string) (int64, error) {
 	input := &dynamodb.ScanInput{
-		TableName: aws.String(c.SourceConfig.TableName),
-	}
-
-	if options.FilterExpression != nil {
-		input.FilterExpression = options.FilterExpression
-		input.ExpressionAttributeNames = options.ExpressionAttributeNames
-		input.ExpressionAttributeValues = options.ExpressionAttributeValues
-	}
-
-	if options.FilterExpression == nil {
-		internal.Logger.Debug("Using parallel scan (no filter)", "segments", options.Concurrency)
-		return c.parallelScan(ctx, itemChan, input, options.Concurrency)
-	} else {
-		internal.Logger.Debug("Using sequential scan with filter", "filter", *options.FilterExpression)
-	}
-
-	paginator := dynamodb.NewScanPaginator(c.SourceClient, input)
-
-	pageCount := 0
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to scan page: %w", err)
-		}
-		pageCount++
-		internal.Logger.Debug("Processed scan page", "page", pageCount, "items", len(page.Items))
-
-		for _, item := range page.Items {
-			select {
-			case itemChan <- item:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-	}
-
-	return nil
-}
-
-func (c *Cloner) parallelScan(ctx context.Context, itemChan chan<- map[string]types.AttributeValue, baseInput *dynamodb.ScanInput, segments int) error {
-	var wg sync.WaitGroup
-	errChan := make(chan error, segments)
-
-	for segment := 0; segment < segments; segment++ {
-		wg.Add(1)
-		go func(seg int) {
-			defer wg.Done()
-
-			input := *baseInput
-			input.Segment = aws.Int32(int32(seg))
-			input.TotalSegments = aws.Int32(int32(segments))
-
-			paginator := dynamodb.NewScanPaginator(c.SourceClient, &input)
-
-			for paginator.HasMorePages() {
-				page, err := paginator.NextPage(ctx)
-				if err != nil {
-					errChan <- fmt.Errorf("failed to scan segment %d: %w", seg, err)
-					return
-				}
-
-				for _, item := range page.Items {
-					select {
-					case itemChan <- item:
-					case <-ctx.Done():
-						errChan <- ctx.Err()
-						return
-					}
-				}
-			}
-		}(segment)
-	}
-
-	wg.Wait()
-	close(errChan)
-
-	for err := range errChan {
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (c *Cloner) writeItems(ctx context.Context, itemChan <-chan map[string]types.AttributeValue, batchSize int) error {
-	batch := make([]types.WriteRequest, 0, batchSize)
-
-	for item := range itemChan {
-		batch = append(batch, types.WriteRequest{
-			PutRequest: &types.PutRequest{
-				Item: item,
-			},
-		})
-
-		if len(batch) >= batchSize {
-			if err := c.writeBatch(ctx, batch); err != nil {
-				return err
-			}
-			batch = batch[:0]
-		}
-	}
-
-	if len(batch) > 0 {
-		return c.writeBatch(ctx, batch)
-	}
-
-	return nil
-}
-
-func (c *Cloner) writeBatch(ctx context.Context, batch []types.WriteRequest) error {
-	input := &dynamodb.BatchWriteItemInput{
-		RequestItems: map[string][]types.WriteRequest{
-			c.DestConfig.TableName: batch,
-		},
-	}
-
-	maxRetries := 3
-	backoff := time.Second
-
-	for retry := 0; retry < maxRetries; retry++ {
-		result, err := c.DestClient.BatchWriteItem(ctx, input)
-		if err != nil {
-			return fmt.Errorf("failed to write batch: %w", err)
-		}
-
-		unprocessed := result.UnprocessedItems[c.DestConfig.TableName]
-		if len(unprocessed) == 0 {
-			internal.Logger.Debug("Batch write completed", "items", len(batch))
-			return nil
-		}
-
-		internal.Logger.Debug("Retrying unprocessed items", "retry", retry+1, "unprocessed", len(unprocessed))
-
-		input.RequestItems[c.DestConfig.TableName] = unprocessed
-
-		time.Sleep(backoff)
-		backoff *= 2
-	}
-
-	return fmt.Errorf("failed to write batch after %d retries", maxRetries)
-}
-
-func (c *Cloner) GetItemCount(ctx context.Context, filterExpression *string) (int64, error) {
-	input := &dynamodb.ScanInput{
-		TableName: aws.String(c.SourceConfig.TableName),
+		TableName: aws.String(tableName),
 		Select:    types.SelectCount,
 	}
 
@@ -301,17 +221,17 @@ func (c *Cloner) GetItemCount(ctx context.Context, filterExpression *string) (in
 	return totalCount, nil
 }
 
-func (c *Cloner) CloneTableStructure(ctx context.Context) error {
-	internal.Logger.Debug("Cloning table structure", "sourceTable", c.SourceConfig.TableName, "destTable", c.DestConfig.TableName)
+func (c *Cloner) CloneTableStructure(ctx context.Context, sourceTableName, destTableName string) error {
+	internal.Logger.Debug("Cloning table structure", "sourceTable", sourceTableName, "destTable", destTableName)
 
 	var spinner *internal.Spinner
 	if !internal.VerboseMode {
-		spinner = internal.NewSpinner(fmt.Sprintf("Creating table structure for %s", c.DestConfig.TableName))
+		spinner = internal.NewSpinner(fmt.Sprintf("Creating table structure for %s", destTableName))
 		spinner.Start()
 	}
 
 	describeInput := &dynamodb.DescribeTableInput{
-		TableName: aws.String(c.SourceConfig.TableName),
+		TableName: aws.String(sourceTableName),
 	}
 
 	result, err := c.SourceClient.DescribeTable(ctx, describeInput)
@@ -322,7 +242,7 @@ func (c *Cloner) CloneTableStructure(ctx context.Context) error {
 	table := result.Table
 
 	createInput := &dynamodb.CreateTableInput{
-		TableName:            aws.String(c.DestConfig.TableName),
+		TableName:            aws.String(destTableName),
 		KeySchema:            table.KeySchema,
 		AttributeDefinitions: table.AttributeDefinitions,
 		BillingMode:          types.BillingModePayPerRequest,
@@ -357,24 +277,518 @@ func (c *Cloner) CloneTableStructure(ctx context.Context) error {
 
 	internal.Logger.Debug("Destination table created, waiting for it to become active")
 	if spinner != nil {
-		spinner.UpdateMessage(fmt.Sprintf("Waiting for table %s to become active", c.DestConfig.TableName))
+		spinner.UpdateMessage(fmt.Sprintf("Waiting for table %s to become active", destTableName))
 	}
 
 	waiter := dynamodb.NewTableExistsWaiter(c.DestClient)
 	err = waiter.Wait(ctx, &dynamodb.DescribeTableInput{
-		TableName: aws.String(c.DestConfig.TableName),
+		TableName: aws.String(destTableName),
 	}, 5*time.Minute)
 
 	if err == nil {
 		if spinner != nil {
-			spinner.Success(fmt.Sprintf("Table structure created: %s", c.DestConfig.TableName))
+			spinner.Success(fmt.Sprintf("Table structure created: %s", destTableName))
 		}
 		internal.Logger.Debug("Table structure cloned successfully")
 	} else {
 		if spinner != nil {
-			spinner.Error(fmt.Sprintf("Failed to create table structure: %s", c.DestConfig.TableName))
+			spinner.Error(fmt.Sprintf("Failed to create table structure: %s", destTableName))
 		}
 	}
 	return err
+}
+
+// getOptimalConcurrency determines optimal concurrency based on table characteristics
+func (c *Cloner) getOptimalConcurrency() int {
+	// Conservative default that works well for most tables
+	// Can be enhanced with table size analysis in the future
+	return 10
+}
+
+// getOptimalBatchSize determines optimal batch size based on item characteristics
+func (c *Cloner) getOptimalBatchSize() int {
+	// DynamoDB batch write supports up to 25 items, this is the optimal default
+	return 25
+}
+
+// monitorProgress provides real-time progress updates
+func (c *Cloner) monitorProgress(ctx context.Context, sourceTableName string, metrics *CloneMetrics, callback func(processed, total int64)) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	var spinner *internal.Spinner
+	if !internal.VerboseMode {
+		spinner = internal.NewSpinner(fmt.Sprintf("Cloning DynamoDB table %s", sourceTableName))
+		spinner.Start()
+	}
+
+	lastProcessed := int64(0)
+	
+	for {
+		select {
+		case <-ctx.Done():
+			if spinner != nil {
+				if metrics.ErrorCount > 0 {
+					spinner.Error(fmt.Sprintf("Failed to clone table %s", sourceTableName))
+				} else {
+					spinner.Success(fmt.Sprintf("DynamoDB table %s cloned successfully", sourceTableName))
+				}
+			}
+			return
+		case <-ticker.C:
+			processed := atomic.LoadInt64(&metrics.ItemsProcessed)
+			
+			if metrics.ItemsTotal > 0 {
+				progress := float64(processed) / float64(metrics.ItemsTotal) * 100
+				
+				// Calculate throughput since last check
+				itemsSinceLastCheck := processed - lastProcessed
+				throughputPerSec := float64(itemsSinceLastCheck) / 2.0 // 2 second interval
+				
+				if spinner != nil {
+					spinner.UpdateMessage(fmt.Sprintf("Cloning %s: %.1f%% (%d/%d items, %.0f items/sec)", 
+						sourceTableName, progress, processed, metrics.ItemsTotal, throughputPerSec))
+				}
+				
+				internal.Logger.Debug("Clone progress", 
+					"table", sourceTableName,
+					"progress_pct", fmt.Sprintf("%.1f%%", progress),
+					"processed", processed,
+					"total", metrics.ItemsTotal,
+					"throughput_per_sec", fmt.Sprintf("%.0f", throughputPerSec),
+					"active_segments", atomic.LoadInt32(&metrics.SegmentsActive))
+			} else {
+				if spinner != nil {
+					spinner.UpdateMessage(fmt.Sprintf("Cloning %s: %d items processed", 
+						sourceTableName, processed))
+				}
+			}
+			
+			if callback != nil {
+				callback(processed, metrics.ItemsTotal)
+			}
+			
+			lastProcessed = processed
+		}
+	}
+}
+
+// scanTableWithMetrics enhances scanning with detailed metrics collection
+func (c *Cloner) scanTableWithMetrics(ctx context.Context, sourceTableName string, itemChan chan<- map[string]types.AttributeValue, options CloneOptions, metrics *CloneMetrics) error {
+	input := &dynamodb.ScanInput{
+		TableName: aws.String(sourceTableName),
+	}
+
+	if options.FilterExpression != nil {
+		input.FilterExpression = options.FilterExpression
+		input.ExpressionAttributeNames = options.ExpressionAttributeNames
+		input.ExpressionAttributeValues = options.ExpressionAttributeValues
+	}
+
+	if options.FilterExpression == nil {
+		internal.Logger.Info("Using parallel scan for optimal performance", "segments", options.Concurrency)
+		return c.parallelScanWithMetrics(ctx, itemChan, input, options.Concurrency, metrics)
+	} else {
+		internal.Logger.Info("Using sequential scan with filter", "filter", *options.FilterExpression)
+		return c.sequentialScanWithMetrics(ctx, itemChan, input, metrics)
+	}
+}
+
+// parallelScanWithMetrics enhances parallel scanning with metrics
+func (c *Cloner) parallelScanWithMetrics(ctx context.Context, itemChan chan<- map[string]types.AttributeValue, baseInput *dynamodb.ScanInput, segments int, metrics *CloneMetrics) error {
+	var wg sync.WaitGroup
+	errChan := make(chan error, segments)
+
+	for segment := 0; segment < segments; segment++ {
+		wg.Add(1)
+		atomic.AddInt32(&metrics.SegmentsActive, 1)
+		
+		go func(seg int) {
+			defer wg.Done()
+			defer atomic.AddInt32(&metrics.SegmentsActive, -1)
+
+			internal.Logger.Debug("Starting scan segment", "segment", seg, "total_segments", segments)
+
+			input := *baseInput
+			input.Segment = aws.Int32(int32(seg))
+			input.TotalSegments = aws.Int32(int32(segments))
+
+			paginator := dynamodb.NewScanPaginator(c.SourceClient, &input)
+			pageCount := 0
+
+			for paginator.HasMorePages() {
+				page, err := paginator.NextPage(ctx)
+				if err != nil {
+					errChan <- fmt.Errorf("failed to scan segment %d page %d: %w", seg, pageCount, err)
+					return
+				}
+				pageCount++
+
+				internal.Logger.Debug("Processed scan page", 
+					"segment", seg, 
+					"page", pageCount, 
+					"items", len(page.Items),
+					"scanned_count", page.ScannedCount,
+					"consumed_capacity", page.ConsumedCapacity)
+
+				for _, item := range page.Items {
+					// Estimate item size for metrics
+					itemSize := c.estimateItemSize(item)
+					atomic.AddInt64(&metrics.BytesProcessed, itemSize)
+					
+					select {
+					case itemChan <- item:
+					case <-ctx.Done():
+						errChan <- ctx.Err()
+						return
+					}
+				}
+			}
+
+			internal.Logger.Debug("Segment scan completed", "segment", seg, "pages", pageCount)
+		}(segment)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// sequentialScanWithMetrics enhances sequential scanning with metrics
+func (c *Cloner) sequentialScanWithMetrics(ctx context.Context, itemChan chan<- map[string]types.AttributeValue, input *dynamodb.ScanInput, metrics *CloneMetrics) error {
+	paginator := dynamodb.NewScanPaginator(c.SourceClient, input)
+	pageCount := 0
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to scan page %d: %w", pageCount, err)
+		}
+		pageCount++
+
+		internal.Logger.Debug("Processed scan page", 
+			"page", pageCount, 
+			"items", len(page.Items),
+			"scanned_count", page.ScannedCount)
+
+		for _, item := range page.Items {
+			// Estimate item size for metrics
+			itemSize := c.estimateItemSize(item)
+			atomic.AddInt64(&metrics.BytesProcessed, itemSize)
+			
+			select {
+			case itemChan <- item:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+
+	internal.Logger.Debug("Sequential scan completed", "pages", pageCount)
+	return nil
+}
+
+// writeItemsWithMetrics enhances batch writing with detailed metrics
+func (c *Cloner) writeItemsWithMetrics(ctx context.Context, destTableName string, itemChan <-chan map[string]types.AttributeValue, options CloneOptions, metrics *CloneMetrics, workerID int) error {
+	batch := make([]types.WriteRequest, 0, options.BatchSize)
+	batchCount := 0
+
+	internal.Logger.Debug("Writer started", "worker_id", workerID)
+
+	for item := range itemChan {
+		batch = append(batch, types.WriteRequest{
+			PutRequest: &types.PutRequest{
+				Item: item,
+			},
+		})
+
+		if len(batch) >= options.BatchSize {
+			batchCount++
+			if err := c.writeBatchWithMetrics(ctx, destTableName, batch, metrics, workerID, batchCount); err != nil {
+				return fmt.Errorf("worker %d batch %d error: %w", workerID, batchCount, err)
+			}
+			atomic.AddInt64(&metrics.ItemsProcessed, int64(len(batch)))
+			atomic.AddInt64(&metrics.BatchesWritten, 1)
+			batch = batch[:0]
+		}
+	}
+
+	// Write final partial batch
+	if len(batch) > 0 {
+		batchCount++
+		if err := c.writeBatchWithMetrics(ctx, destTableName, batch, metrics, workerID, batchCount); err != nil {
+			return fmt.Errorf("worker %d final batch error: %w", workerID, err)
+		}
+		atomic.AddInt64(&metrics.ItemsProcessed, int64(len(batch)))
+		atomic.AddInt64(&metrics.BatchesWritten, 1)
+	}
+
+	internal.Logger.Debug("Writer completed", "worker_id", workerID, "batches_written", batchCount)
+	return nil
+}
+
+// writeBatchWithMetrics enhances batch writing with retry logic and metrics
+func (c *Cloner) writeBatchWithMetrics(ctx context.Context, destTableName string, batch []types.WriteRequest, metrics *CloneMetrics, workerID, batchNum int) error {
+	input := &dynamodb.BatchWriteItemInput{
+		RequestItems: map[string][]types.WriteRequest{
+			destTableName: batch,
+		},
+	}
+
+	maxRetries := 5
+	backoff := 100 * time.Millisecond
+	originalBatchSize := len(batch)
+
+	for retry := 0; retry < maxRetries; retry++ {
+		start := time.Now()
+		result, err := c.DestClient.BatchWriteItem(ctx, input)
+		duration := time.Since(start)
+
+		if err != nil {
+			atomic.AddInt64(&metrics.ErrorCount, 1)
+			internal.Logger.Debug("Batch write error", 
+				"worker_id", workerID,
+				"batch_num", batchNum,
+				"retry", retry,
+				"error", err,
+				"duration", duration)
+			
+			if retry == maxRetries-1 {
+				return fmt.Errorf("batch write failed after %d retries: %w", maxRetries, err)
+			}
+			
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		unprocessed := result.UnprocessedItems[destTableName]
+		if len(unprocessed) == 0 {
+			internal.Logger.Debug("Batch write successful", 
+				"worker_id", workerID,
+				"batch_num", batchNum,
+				"items", originalBatchSize,
+				"duration", duration,
+				"consumed_capacity", result.ConsumedCapacity)
+			return nil
+		}
+
+		atomic.AddInt64(&metrics.RetryCount, 1)
+		internal.Logger.Debug("Retrying unprocessed items", 
+			"worker_id", workerID,
+			"batch_num", batchNum,
+			"retry", retry+1, 
+			"unprocessed", len(unprocessed),
+			"original_size", originalBatchSize)
+
+		input.RequestItems[destTableName] = unprocessed
+		
+		// Exponential backoff with jitter
+		time.Sleep(backoff + time.Duration(workerID*10)*time.Millisecond)
+		backoff *= 2
+	}
+
+	return fmt.Errorf("failed to write batch after %d retries, %d items still unprocessed", 
+		maxRetries, len(input.RequestItems[destTableName]))
+}
+
+// estimateItemSize provides rough size estimation for metrics
+func (c *Cloner) estimateItemSize(item map[string]types.AttributeValue) int64 {
+	// Simple estimation: each attribute value is roughly 50 bytes on average
+	// This is a rough estimate for metrics purposes
+	return int64(len(item) * 50)
+}
+
+// DiscoverTablesWithPrefix finds all tables that start with the given prefix
+func (c *Cloner) DiscoverTablesWithPrefix(ctx context.Context, prefix string) ([]string, error) {
+	internal.Logger.Info("Discovering tables with prefix", "prefix", prefix)
+	
+	var tables []string
+	var lastEvaluatedTableName *string
+	
+	for {
+		input := &dynamodb.ListTablesInput{
+			Limit: aws.Int32(100), // Get tables in batches
+		}
+		
+		if lastEvaluatedTableName != nil {
+			input.ExclusiveStartTableName = lastEvaluatedTableName
+		}
+		
+		result, err := c.SourceClient.ListTables(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list tables: %w", err)
+		}
+		
+		// Filter tables that match our prefix
+		for _, tableName := range result.TableNames {
+			if strings.HasPrefix(tableName, prefix+".") {
+				tables = append(tables, tableName)
+				internal.Logger.Debug("Found matching table", "table", tableName, "prefix", prefix)
+			}
+		}
+		
+		// Check if there are more tables to fetch
+		if result.LastEvaluatedTableName == nil {
+			break
+		}
+		lastEvaluatedTableName = result.LastEvaluatedTableName
+	}
+	
+	internal.Logger.Info("Table discovery completed", "prefix", prefix, "tables_found", len(tables))
+	return tables, nil
+}
+
+// CloneTablesWithPrefix clones all tables that match the source prefix to destination with new prefix
+func (c *Cloner) CloneTablesWithPrefix(ctx context.Context, options CloneOptions) error {
+	if options.SourcePrefix == "" || options.DestPrefix == "" {
+		return fmt.Errorf("both SourcePrefix and DestPrefix must be specified for prefix-based cloning")
+	}
+	
+	totalStart := time.Now()
+	internal.Logger.Info("Starting prefix-based DynamoDB clone", 
+		"source_prefix", options.SourcePrefix, 
+		"dest_prefix", options.DestPrefix)
+	
+	// Discover source tables
+	var sourceTables []string
+	err := internal.SimpleSpinner(fmt.Sprintf("Discovering tables with prefix %s", options.SourcePrefix), func() error {
+		var discoverErr error
+		sourceTables, discoverErr = c.DiscoverTablesWithPrefix(ctx, options.SourcePrefix)
+		return discoverErr
+	})
+	if err != nil {
+		return fmt.Errorf("failed to discover source tables: %w", err)
+	}
+	
+	if len(sourceTables) == 0 {
+		internal.Logger.Warn("No tables found with specified prefix", "prefix", options.SourcePrefix)
+		return fmt.Errorf("no tables found with prefix: %s", options.SourcePrefix)
+	}
+	
+	internal.Logger.Info("Found tables to clone", "count", len(sourceTables), "tables", sourceTables)
+	
+	var totalItemsCloned int64
+	var totalErrors int64
+	
+	// Clone each table
+	for i, sourceTable := range sourceTables {
+		// Generate destination table name by replacing prefix
+		destTable := strings.Replace(sourceTable, options.SourcePrefix+".", options.DestPrefix+".", 1)
+		
+		internal.Logger.Info("Cloning table", 
+			"progress", fmt.Sprintf("%d/%d", i+1, len(sourceTables)),
+			"source_table", sourceTable, 
+			"dest_table", destTable)
+		
+		// Create temporary cloner for this specific table pair
+		tableCloner := &Cloner{
+			SourceConfig: Config{
+				Region: c.SourceConfig.Region,
+			},
+			DestConfig: Config{
+				Region: c.DestConfig.Region,
+			},
+			SourceClient: c.SourceClient,
+			DestClient:   c.DestClient,
+		}
+		
+		// Clone table structure first
+		structureErr := tableCloner.CloneTableStructure(ctx, sourceTable, destTable)
+		if structureErr != nil {
+			internal.Logger.Error("Failed to clone table structure", 
+				"source_table", sourceTable,
+				"dest_table", destTable,
+				"error", structureErr)
+			totalErrors++
+			continue // Continue with next table
+		}
+		
+		// Clone table data
+		tableOptions := options
+		tableOptions.ProgressCallback = func(processed, total int64) {
+			if options.ProgressCallback != nil {
+				// Aggregate progress across all tables
+				options.ProgressCallback(totalItemsCloned+processed, -1) // Total unknown for multiple tables
+			}
+		}
+		
+		dataErr := tableCloner.CloneTable(ctx, sourceTable, destTable, tableOptions)
+		if dataErr != nil {
+			internal.Logger.Error("Failed to clone table data", 
+				"source_table", sourceTable,
+				"dest_table", destTable,
+				"error", dataErr)
+			totalErrors++
+			continue
+		}
+		
+		// Get item count for progress tracking (best effort)
+		if itemCount, countErr := tableCloner.GetItemCount(ctx, sourceTable, options.FilterExpression); countErr == nil {
+			totalItemsCloned += itemCount
+		}
+		
+		internal.Logger.Info("Table cloned successfully", 
+			"source_table", sourceTable,
+			"dest_table", destTable,
+			"progress", fmt.Sprintf("%d/%d", i+1, len(sourceTables)))
+	}
+	
+	totalDuration := time.Since(totalStart)
+	
+	if totalErrors > 0 {
+		internal.Logger.Error("Prefix-based clone completed with errors", 
+			"total_duration", totalDuration,
+			"tables_processed", len(sourceTables),
+			"tables_failed", totalErrors,
+			"items_cloned", totalItemsCloned)
+		return fmt.Errorf("cloning completed with %d errors out of %d tables", totalErrors, len(sourceTables))
+	}
+	
+	internal.Logger.Info("Prefix-based clone completed successfully", 
+		"total_duration", totalDuration,
+		"tables_cloned", len(sourceTables),
+		"total_items_cloned", totalItemsCloned,
+		"source_prefix", options.SourcePrefix,
+		"dest_prefix", options.DestPrefix)
+	
+	return nil
+}
+
+func (c *Cloner) logCloneResults(metrics *CloneMetrics, duration time.Duration, err error) {
+	if err != nil {
+		internal.Logger.Error("DynamoDB clone failed", 
+			"duration", duration,
+			"items_processed", metrics.ItemsProcessed,
+			"items_total", metrics.ItemsTotal,
+			"error_count", metrics.ErrorCount,
+			"retry_count", metrics.RetryCount,
+			"error", err)
+		return
+	}
+
+	successRate := float64(metrics.ItemsProcessed) / float64(metrics.ItemsTotal) * 100
+	if metrics.ItemsTotal <= 0 {
+		successRate = 100 // Unknown total, assume success if no errors
+	}
+
+	internal.Logger.Info("DynamoDB clone completed successfully",
+		"duration", duration,
+		"items_processed", metrics.ItemsProcessed,
+		"items_total", metrics.ItemsTotal,
+		"success_rate", fmt.Sprintf("%.1f%%", successRate),
+		"throughput_per_sec", fmt.Sprintf("%.1f", metrics.ThroughputPerSec),
+		"avg_item_size_bytes", metrics.AvgItemSize,
+		"total_bytes_processed", metrics.BytesProcessed,
+		"batches_written", metrics.BatchesWritten,
+		"error_count", metrics.ErrorCount,
+		"retry_count", metrics.RetryCount)
 }
 

@@ -132,9 +132,7 @@ func createDefaultConfig(configPath string) (*Config, error) {
 		},
 		DynamoDB: map[string]dynamodb.Config{
 			"example/local": {
-				Region:    "us-east-1",
-				TableName: "test-table",
-				Endpoint:  "http://localhost:8000",
+				Region: "us-east-1",
 			},
 		},
 	}

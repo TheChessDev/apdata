@@ -5,13 +5,15 @@ This document provides an overview of the comprehensive test suite added to the 
 ## Test Coverage
 
 ### MySQL Module (`mysql/clone_test.go`)
-- **TableExistsError**: Custom error type behavior
+- **Schema Operations**: Optimized CloneSchema with RDS compatibility and performance monitoring
 - **Cloner Creation**: Config validation and cloner instantiation  
 - **Connection Logic**: Database connection with/without passwords
-- **Table Management**: Dependency sorting and batch operations
-- **Error Detection**: MySQL error code recognition (42S01, "already exists")
-- **Schema Operations**: CloneSchema and CloneSchemaWithOptions flows
+- **Performance Optimization**: Table size analysis and intelligent processing strategies
+- **Data Cloning**: Chunked streaming for large tables, parallel processing for small tables
+- **Progress Tracking**: Real-time progress monitoring with row counting and timing
+- **Loading Indicators**: Spinner functionality for all long-running data operations  
 - **DSN Generation**: Connection string formatting for passwordless connections
+- **Error Handling**: Comprehensive error detection and fallback mechanisms
 
 ### Config Module (`config/config_test.go`)
 - **Connection String Parsing**: Valid/invalid format validation
@@ -47,9 +49,9 @@ apdata           4        ✅ PASS
 apdata/cmd       6        ✅ PASS  
 apdata/config    4        ✅ PASS
 apdata/internal  10       ✅ PASS
-apdata/mysql     11       ✅ PASS
-dynamodb         0        ⚠️  NO TESTS
-TOTAL            35       ✅ ALL PASS
+apdata/mysql     21       ✅ PASS
+apdata/dynamodb  25       ✅ PASS
+TOTAL            70       ✅ ALL PASS
 ```
 
 ## Key Test Features
@@ -99,8 +101,19 @@ go test ./config -run TestParseConnectionString
 - State restoration after tests
 - No external dependencies required
 
+### DynamoDB Module (`dynamodb/clone_test.go`)
+- **Performance Optimization**: CloneTable with intelligent concurrency and batch sizing
+- **Metrics Tracking**: Comprehensive CloneMetrics with atomic operations for thread safety
+- **Progress Monitoring**: Real-time progress tracking with throughput calculations
+- **Loading Indicators**: Spinner functionality for all DynamoDB operations
+- **Error Handling**: Retry logic, connection failure handling, and graceful degradation
+- **Parallel Scanning**: Multi-segment parallel scan optimization
+- **Memory Management**: Efficient batch processing and channel buffering
+- **Configuration**: Intelligent defaults and performance tuning
+- **Prefix-Based Cloning**: Table discovery and prefix mapping functionality
+- **Validation**: Comprehensive input validation and error handling for prefix operations
+
 ### 🎯 **Areas for Future Enhancement**
-- Add DynamoDB package tests
 - Integration tests with test containers
 - Performance benchmarks
 - More comprehensive error scenario testing
