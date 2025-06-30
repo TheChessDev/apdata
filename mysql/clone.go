@@ -105,7 +105,7 @@ func (c *Cloner) CloneSchema() error {
 	})
 
 	exportDuration := time.Since(exportStart)
-	internal.Logger.Info("Schema export completed", "duration", exportDuration, "file", schemaFile)
+	internal.Logger.Debug("Schema export completed", "duration", exportDuration, "file", schemaFile)
 
 	// Check if export failed but we still got a usable schema file (common with RDS privilege issues)
 	if err != nil {
@@ -152,16 +152,19 @@ func (c *Cloner) CloneSchema() error {
 		return c.importSQL(schemaFile)
 	})
 	importDuration := time.Since(importStart)
-	internal.Logger.Info("Schema import completed", "duration", importDuration)
+	internal.Logger.Debug("Schema import completed", "duration", importDuration)
 
 	// Clean up schema file
 	os.Remove(schemaFile)
 
 	totalDuration := time.Since(totalStart)
-	internal.Logger.Info("Schema clone completed", "total_duration", totalDuration,
+	internal.Logger.Debug("Schema clone completed", "total_duration", totalDuration,
 		"recreate_pct", fmt.Sprintf("%.1f%%", float64(recreateDuration.Nanoseconds())/float64(totalDuration.Nanoseconds())*100),
 		"export_pct", fmt.Sprintf("%.1f%%", float64(exportDuration.Nanoseconds())/float64(totalDuration.Nanoseconds())*100),
 		"import_pct", fmt.Sprintf("%.1f%%", float64(importDuration.Nanoseconds())/float64(totalDuration.Nanoseconds())*100))
+
+	// Finish the schema cloning operation line
+	internal.FinishLine()
 
 	return err
 }
@@ -234,7 +237,7 @@ func min(a, b int64) int64 {
 
 func (c *Cloner) CloneData(tables []string) error {
 	totalStart := time.Now()
-	internal.Logger.Info("Starting data clone operation")
+	internal.Logger.Debug("Starting data clone operation")
 
 	if len(tables) == 0 {
 		var err error
@@ -263,7 +266,7 @@ func (c *Cloner) CloneData(tables []string) error {
 	// Categorize tables by size for optimal processing strategy
 	largeTables, mediumTables, smallTables := c.categorizeTablesBySize(tables, tableSizes)
 	
-	internal.Logger.Info("Table size analysis", 
+	internal.Logger.Debug("Table size analysis", 
 		"large_tables", len(largeTables),
 		"medium_tables", len(mediumTables), 
 		"small_tables", len(smallTables),
@@ -276,38 +279,30 @@ func (c *Cloner) CloneData(tables []string) error {
 	for _, size := range tableSizes {
 		totalRows += size
 	}
-	internal.Logger.Info("Estimated total rows to clone", "rows", totalRows)
+	internal.Logger.Debug("Estimated total rows to clone", "rows", totalRows)
 
 	// Process large tables individually with streaming
-	for _, table := range largeTables {
-		internal.Logger.Info("Processing large table", "table", table, "estimated_rows", tableSizes[table])
-		start := time.Now()
-		
-		if err := c.cloneTableWithStreaming(table, tableSizes[table], &processedRows, totalRows); err != nil {
+	for i, table := range largeTables {
+		err := internal.SimpleSpinner(fmt.Sprintf("Cloning large table %s (%d/%d)", table, i+1, len(largeTables)), func() error {
+			return c.cloneTableWithStreaming(table, tableSizes[table], &processedRows, totalRows)
+		})
+		if err != nil {
 			return fmt.Errorf("failed to clone large table %s: %w", table, err)
 		}
-		
-		duration := time.Since(start)
-		internal.Logger.Info("Large table completed", "table", table, "duration", duration, 
-			"rows", tableSizes[table], "rows_per_sec", float64(tableSizes[table])/duration.Seconds())
 	}
 
 	// Process medium tables with optimized mysqldump
-	if len(mediumTables) > 0 {
-		internal.Logger.Info("Processing medium tables", "count", len(mediumTables))
-		for _, table := range mediumTables {
-			start := time.Now()
-			if err := c.cloneTableOptimized(table, tableSizes[table], &processedRows, totalRows); err != nil {
-				return fmt.Errorf("failed to clone medium table %s: %w", table, err)
-			}
-			duration := time.Since(start)
-			internal.Logger.Info("Medium table completed", "table", table, "duration", duration)
+	for i, table := range mediumTables {
+		err := internal.SimpleSpinner(fmt.Sprintf("Cloning medium table %s (%d/%d)", table, i+1, len(mediumTables)), func() error {
+			return c.cloneTableOptimized(table, tableSizes[table], &processedRows, totalRows)
+		})
+		if err != nil {
+			return fmt.Errorf("failed to clone medium table %s: %w", table, err)
 		}
 	}
 
 	// Process small tables in parallel batches
 	if len(smallTables) > 0 {
-		internal.Logger.Info("Processing small tables in parallel", "count", len(smallTables))
 		smallTablesErr := internal.SimpleSpinner(fmt.Sprintf("Cloning %d small tables in parallel", len(smallTables)), func() error {
 			return c.cloneSmallTablesParallel(smallTables, tableSizes, &processedRows, totalRows)
 		})
@@ -317,11 +312,14 @@ func (c *Cloner) CloneData(tables []string) error {
 	}
 
 	totalDuration := time.Since(totalStart)
-	internal.Logger.Info("Data clone completed", 
+	internal.Logger.Debug("Data clone completed", 
 		"total_duration", totalDuration,
 		"total_rows_processed", processedRows,
 		"avg_rows_per_sec", float64(processedRows)/totalDuration.Seconds(),
 		"tables_processed", len(tables))
+
+	// Finish the data cloning operation line
+	internal.FinishLine()
 
 	return nil
 }
@@ -571,7 +569,7 @@ func (c *Cloner) CloneTablesWithPrefix(sourcePrefix, destPrefix string, schemaOn
 	}
 	
 	totalStart := time.Now()
-	internal.Logger.Info("Starting prefix-based MySQL clone", 
+	internal.Logger.Debug("Starting prefix-based MySQL clone", 
 		"source_prefix", sourcePrefix, 
 		"dest_prefix", destPrefix)
 	
@@ -591,7 +589,7 @@ func (c *Cloner) CloneTablesWithPrefix(sourcePrefix, destPrefix string, schemaOn
 		return fmt.Errorf("no tables found with prefix: %s", sourcePrefix)
 	}
 	
-	internal.Logger.Info("Found tables to clone", "count", len(sourceTables), "tables", sourceTables)
+	internal.Logger.Debug("Found tables to clone", "count", len(sourceTables), "tables", sourceTables)
 	
 	var totalErrors int64
 	
@@ -599,11 +597,6 @@ func (c *Cloner) CloneTablesWithPrefix(sourcePrefix, destPrefix string, schemaOn
 	for i, sourceTable := range sourceTables {
 		// Generate destination table name by replacing prefix
 		destTable := strings.Replace(sourceTable, sourcePrefix+"_", destPrefix+"_", 1)
-		
-		internal.Logger.Info("Cloning table", 
-			"progress", fmt.Sprintf("%d/%d", i+1, len(sourceTables)),
-			"source_table", sourceTable, 
-			"dest_table", destTable)
 		
 		// Create temporary cloner for this specific table pair
 		tableCloner := &Cloner{
@@ -623,36 +616,33 @@ func (c *Cloner) CloneTablesWithPrefix(sourcePrefix, destPrefix string, schemaOn
 			},
 		}
 		
-		// Clone schema first if requested
-		if !dataOnly {
-			// For MySQL, we need to handle table-specific schema cloning
-			// This is more complex than DynamoDB since we need to extract and modify schema for specific tables
-			if err := tableCloner.cloneTableSchema(sourceTable, destTable); err != nil {
-				internal.Logger.Error("Failed to clone table schema", 
-					"source_table", sourceTable,
-					"dest_table", destTable,
-					"error", err)
-				totalErrors++
-				continue // Continue with next table
+		// Clone table with progress indicator
+		err := internal.SimpleSpinner(fmt.Sprintf("Cloning table %s → %s (%d/%d)", sourceTable, destTable, i+1, len(sourceTables)), func() error {
+			// Clone schema first if requested
+			if !dataOnly {
+				if err := tableCloner.cloneTableSchema(sourceTable, destTable); err != nil {
+					return fmt.Errorf("failed to clone schema: %w", err)
+				}
 			}
-		}
-		
-		// Clone data if requested
-		if !schemaOnly {
-			if err := tableCloner.cloneTableData(sourceTable, destTable); err != nil {
-				internal.Logger.Error("Failed to clone table data", 
-					"source_table", sourceTable,
-					"dest_table", destTable,
-					"error", err)
-				totalErrors++
-				continue
+			
+			// Clone data if requested
+			if !schemaOnly {
+				if err := tableCloner.cloneTableData(sourceTable, destTable); err != nil {
+					return fmt.Errorf("failed to clone data: %w", err)
+				}
 			}
-		}
+			
+			return nil
+		})
 		
-		internal.Logger.Info("Table cloned successfully", 
-			"source_table", sourceTable,
-			"dest_table", destTable,
-			"progress", fmt.Sprintf("%d/%d", i+1, len(sourceTables)))
+		if err != nil {
+			internal.Logger.Error("Failed to clone table", 
+				"source_table", sourceTable,
+				"dest_table", destTable,
+				"error", err)
+			totalErrors++
+			continue
+		}
 	}
 	
 	totalDuration := time.Since(totalStart)
@@ -665,11 +655,14 @@ func (c *Cloner) CloneTablesWithPrefix(sourcePrefix, destPrefix string, schemaOn
 		return fmt.Errorf("cloning completed with %d errors out of %d tables", totalErrors, len(sourceTables))
 	}
 	
-	internal.Logger.Info("Prefix-based clone completed successfully", 
+	internal.Logger.Debug("Prefix-based clone completed successfully", 
 		"total_duration", totalDuration,
 		"tables_cloned", len(sourceTables),
 		"source_prefix", sourcePrefix,
 		"dest_prefix", destPrefix)
+	
+	// Finish the prefix-based cloning operation line
+	internal.FinishLine()
 	
 	return nil
 }

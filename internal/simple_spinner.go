@@ -43,10 +43,19 @@ func SimpleSpinner(message string, operation func() error) error {
 	// Clear the spinner line and show result
 	fmt.Print("\r\033[K")
 	if err != nil {
-		fmt.Printf("❌ Failed: %s\n", message)
+		fmt.Printf("❌ Failed: %s", message)
 	} else {
-		fmt.Printf("✅ %s\n", message)
+		fmt.Printf("✅ %s", message)
 	}
+	os.Stdout.Sync()
 
 	return err
+}
+
+// FinishLine moves to the next line after a series of related operations
+func FinishLine() {
+	if !VerboseMode {
+		fmt.Print("\n")
+		os.Stdout.Sync()
+	}
 }

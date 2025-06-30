@@ -15,8 +15,19 @@ import (
 )
 
 var cloneCmd = &cobra.Command{
-	Use:           "clone [mysql|dynamodb|all]",
-	Short:         "Clone data from cloud to local",
+	Use:   "clone [mysql|dynamodb|all]",
+	Short: "Clone data from cloud to local",
+	Long: `Clone data from cloud to local environments.
+
+Examples:
+  # Clone all tables for a component
+  apdata clone dynamodb --source allpoint/dev --dest julian/dev --component-name connectors-data-api
+
+  # Interactive checkbox selection for a component  
+  apdata clone dynamodb --source allpoint/dev --dest julian/dev --component-name connectors-data-api --interactive
+
+  # Clone a specific MySQL table
+  apdata clone mysql --source allpoint/dev --dest julian/dev --table specific-table-name`,
 	Args:          cobra.ExactArgs(1),
 	RunE:          runClone,
 	SilenceUsage:  true,
@@ -29,12 +40,14 @@ func runClone(cmd *cobra.Command, args []string) error {
 	source, _ := cmd.Flags().GetString("source")
 	dest, _ := cmd.Flags().GetString("dest")
 	table, _ := cmd.Flags().GetString("table")
+	componentName, _ := cmd.Flags().GetString("component-name")
 	filter, _ := cmd.Flags().GetString("filter")
 	schemaOnly, _ := cmd.Flags().GetBool("schema-only")
 	dataOnly, _ := cmd.Flags().GetBool("data-only")
 	whereClause, _ := cmd.Flags().GetString("where")
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	verbose, _ := cmd.Flags().GetBool("verbose")
+	interactive, _ := cmd.Flags().GetBool("interactive")
 
 	if verbose {
 		internal.SetLogLevel("debug")
@@ -44,6 +57,16 @@ func runClone(cmd *cobra.Command, args []string) error {
 
 	if source == "" || dest == "" {
 		return fmt.Errorf("both --source and --dest are required")
+	}
+
+	// Validate interactive flag usage
+	if interactive && componentName == "" {
+		return fmt.Errorf("--interactive flag can only be used with --component-name")
+	}
+
+	// Validate table flag usage - only allow with MySQL
+	if table != "" && (cloneType == "dynamodb" || cloneType == "all") {
+		return fmt.Errorf("--table flag is only supported for MySQL. For DynamoDB, use --component-name with --interactive for table selection")
 	}
 
 	cfg, err := config.LoadConfig()
@@ -59,18 +82,18 @@ func runClone(cmd *cobra.Command, args []string) error {
 
 	switch cloneType {
 	case "mysql":
-		if err := cloneMySQLData(cfg, source, dest, table, whereClause, schemaOnly, dataOnly); err != nil {
+		if err := cloneMySQLData(cfg, source, dest, table, componentName, whereClause, schemaOnly, dataOnly); err != nil {
 			return formatError(err)
 		}
 	case "dynamodb":
-		if err := cloneDynamoDBData(cfg, source, dest, table, filter, concurrency); err != nil {
+		if err := cloneDynamoDBData(cfg, source, dest, table, componentName, filter, concurrency, interactive); err != nil {
 			return formatError(err)
 		}
 	case "all":
-		if err := cloneMySQLData(cfg, source, dest, table, whereClause, schemaOnly, dataOnly); err != nil {
+		if err := cloneMySQLData(cfg, source, dest, table, componentName, whereClause, schemaOnly, dataOnly); err != nil {
 			return formatError(err)
 		}
-		if err := cloneDynamoDBData(cfg, source, dest, table, filter, concurrency); err != nil {
+		if err := cloneDynamoDBData(cfg, source, dest, table, componentName, filter, concurrency, interactive); err != nil {
 			return formatError(err)
 		}
 	default:
@@ -116,7 +139,7 @@ func formatError(err error) error {
 	return fmt.Errorf("❌ %s", errStr)
 }
 
-func cloneMySQLData(cfg *config.Config, source, dest, table, whereClause string, schemaOnly, dataOnly bool) error {
+func cloneMySQLData(cfg *config.Config, source, dest, table, componentName, whereClause string, schemaOnly, dataOnly bool) error {
 	sourceConn, err := config.ParseConnectionString(source)
 	if err != nil {
 		return fmt.Errorf("invalid source connection string: %w", err)
@@ -148,9 +171,15 @@ func cloneMySQLData(cfg *config.Config, source, dest, table, whereClause string,
 	sourcePrefix := fmt.Sprintf("%s_%s", sourceConn.Client, sourceConn.Env)
 	destPrefix := fmt.Sprintf("%s_%s", destConn.Client, destConn.Env)
 	
+	// Add component name to prefix if provided
+	if componentName != "" {
+		sourcePrefix = fmt.Sprintf("%s_%s", sourcePrefix, componentName)
+		destPrefix = fmt.Sprintf("%s_%s", destPrefix, componentName)
+	}
+	
 	// If no specific table is provided, use prefix-based cloning
 	if table == "" {
-		internal.Logger.Info("Starting prefix-based MySQL clone", 
+		internal.Logger.Debug("Starting prefix-based MySQL clone", 
 			"source_prefix", sourcePrefix, 
 			"dest_prefix", destPrefix)
 		
@@ -190,7 +219,7 @@ func cloneMySQLData(cfg *config.Config, source, dest, table, whereClause string,
 	return nil
 }
 
-func cloneDynamoDBData(cfg *config.Config, source, dest, table, filter string, concurrency int) error {
+func cloneDynamoDBData(cfg *config.Config, source, dest, table, componentName, filter string, concurrency int, interactive bool) error {
 	sourceConn, err := config.ParseConnectionString(source)
 	if err != nil {
 		return fmt.Errorf("invalid source connection string: %w", err)
@@ -222,53 +251,28 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, filter string, c
 	sourcePrefix := fmt.Sprintf("%s.%s", sourceConn.Client, sourceConn.Env)
 	destPrefix := fmt.Sprintf("%s.%s", destConn.Client, destConn.Env)
 	
-	// If no specific table is provided, use prefix-based cloning
-	if table == "" {
-		internal.Logger.Info("Starting prefix-based DynamoDB clone", 
-			"source_prefix", sourcePrefix, 
-			"dest_prefix", destPrefix)
-		
-		// Create cloner for prefix-based operations (table names will be set dynamically)
-		cloner, err := dynamodb.NewCloner(*sourceConfig, *destConfig)
-		if err != nil {
-			return fmt.Errorf("failed to create DynamoDB cloner: %w", err)
-		}
-
-		options := dynamodb.CloneOptions{
-			Concurrency:  concurrency,
-			BatchSize:    25,
-			SourcePrefix: sourcePrefix,
-			DestPrefix:   destPrefix,
-		}
-
-		if filter != "" {
-			options.FilterExpression = &filter
-			if strings.Contains(filter, ":") || strings.Contains(filter, "#") {
-				internal.Logger.Warn("Filter expression contains attribute names/values. Please ensure they are properly configured.")
-			}
-		}
-
-		if err := cloner.CloneTablesWithPrefix(ctx, options); err != nil {
-			return fmt.Errorf("failed to clone DynamoDB tables with prefix: %w", err)
-		}
-		
-		return nil
+	// Add component name to prefix if provided
+	if componentName != "" {
+		sourcePrefix = fmt.Sprintf("%s.%s", sourcePrefix, componentName)
+		destPrefix = fmt.Sprintf("%s.%s", destPrefix, componentName)
 	}
-
-	// Single table cloning (existing behavior)
+	
+	// DynamoDB only supports prefix-based cloning now (no specific table names)
+	internal.Logger.Debug("Starting prefix-based DynamoDB clone", 
+		"source_prefix", sourcePrefix, 
+		"dest_prefix", destPrefix)
+	
+	// Create cloner for prefix-based operations (table names will be set dynamically)
 	cloner, err := dynamodb.NewCloner(*sourceConfig, *destConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create DynamoDB cloner: %w", err)
 	}
 
-	internal.Logger.Info("Cloning DynamoDB table structure")
-	if err := cloner.CloneTableStructure(ctx, table, table); err != nil {
-		internal.Logger.Warn("Failed to clone table structure (table might already exist)", "error", err)
-	}
-
 	options := dynamodb.CloneOptions{
-		Concurrency: concurrency,
-		BatchSize:   25,
+		Concurrency:  concurrency,
+		BatchSize:    25,
+		SourcePrefix: sourcePrefix,
+		DestPrefix:   destPrefix,
 	}
 
 	if filter != "" {
@@ -278,21 +282,15 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, filter string, c
 		}
 	}
 
-	err = internal.WithSpinnerConditional("Getting item count", func() error {
-		count, err := cloner.GetItemCount(ctx, table, options.FilterExpression)
-		if err != nil {
-			internal.Logger.Warn("Failed to get item count", "error", err)
-		} else {
-			internal.Logger.Info("Cloning DynamoDB data", "itemCount", count)
+	// Use interactive mode if requested and component name is provided
+	if interactive && componentName != "" {
+		if err := cloner.CloneTablesWithPrefixInteractive(ctx, options); err != nil {
+			return fmt.Errorf("failed to clone DynamoDB tables with interactive selection: %w", err)
 		}
-		return nil
-	}, !internal.VerboseMode)
-	if err != nil {
-		return err
-	}
-
-	if err := cloner.CloneTable(ctx, table, table, options); err != nil {
-		return fmt.Errorf("failed to clone DynamoDB table: %w", err)
+	} else {
+		if err := cloner.CloneTablesWithPrefix(ctx, options); err != nil {
+			return fmt.Errorf("failed to clone DynamoDB tables with prefix: %w", err)
+		}
 	}
 
 	return nil
@@ -306,11 +304,13 @@ func init() {
 	cloneCmd.MarkFlagRequired("source")
 	cloneCmd.MarkFlagRequired("dest")
 
-	cloneCmd.Flags().String("table", "", "Optional table name")
+	cloneCmd.Flags().String("table", "", "Optional table name (MySQL only)")
+	cloneCmd.Flags().String("component-name", "", "Optional component name for prefix-based cloning (e.g., connectors-data-api)")
 	cloneCmd.Flags().String("filter", "", "Optional filter expression for DynamoDB")
 	cloneCmd.Flags().String("where", "", "Optional WHERE clause for MySQL")
 	cloneCmd.Flags().Bool("schema-only", false, "Clone schema only (MySQL)")
 	cloneCmd.Flags().Bool("data-only", false, "Clone data only (MySQL)")
-	cloneCmd.Flags().Int("concurrency", 10, "Number of concurrent workers for DynamoDB")
+	cloneCmd.Flags().Int("concurrency", 25, "Number of concurrent workers for DynamoDB")
 	cloneCmd.Flags().Bool("verbose", false, "Enable verbose logging")
+	cloneCmd.Flags().Bool("interactive", false, "Enable interactive checkbox selection when using --component-name")
 }

@@ -16,6 +16,14 @@ import (
 	"apdata/internal"
 )
 
+// min returns the smaller of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 type Config struct {
 	Region string
 }
@@ -49,6 +57,8 @@ type CloneMetrics struct {
 	BatchesWritten   int64
 	AvgItemSize      int64
 	ThroughputPerSec float64
+	ThrottleCount    int64  // Track throttling incidents
+	LastThrottleTime time.Time
 }
 
 func NewCloner(sourceConfig, destConfig Config) (*Cloner, error) {
@@ -95,8 +105,12 @@ func createClient(cfg Config) (*dynamodb.Client, error) {
 }
 
 func (c *Cloner) CloneTable(ctx context.Context, sourceTableName, destTableName string, options CloneOptions) error {
+	return c.cloneTableWithSpinner(ctx, sourceTableName, destTableName, options, true)
+}
+
+func (c *Cloner) cloneTableWithSpinner(ctx context.Context, sourceTableName, destTableName string, options CloneOptions, showSpinner bool) error {
 	totalStart := time.Now()
-	internal.Logger.Info("Starting DynamoDB clone operation", "source_table", sourceTableName, "dest_table", destTableName)
+	internal.Logger.Debug("Starting DynamoDB clone operation", "source_table", sourceTableName, "dest_table", destTableName)
 
 	// Set intelligent defaults based on performance analysis
 	if options.Concurrency == 0 {
@@ -122,7 +136,30 @@ func (c *Cloner) CloneTable(ctx context.Context, sourceTableName, destTableName 
 		metrics.ItemsTotal = -1 // Unknown size
 	}
 
-	internal.Logger.Info("Table analysis completed", 
+	// Optimize concurrency based on table size if using default concurrency
+	if metrics.ItemsTotal > 0 && options.Concurrency == c.getOptimalConcurrency() {
+		optimizedConcurrency := c.getOptimalConcurrencyForTable(metrics.ItemsTotal)
+		if optimizedConcurrency > options.Concurrency {
+			internal.Logger.Debug("Optimizing concurrency for large table", 
+				"original_concurrency", options.Concurrency,
+				"optimized_concurrency", optimizedConcurrency,
+				"item_count", metrics.ItemsTotal)
+			options.Concurrency = optimizedConcurrency
+		}
+	}
+	
+	// For very large tables, use conservative concurrency to reduce throttling
+	if metrics.ItemsTotal > 500000 {
+		conservativeConcurrency := min(options.Concurrency, 15)
+		internal.Logger.Debug("Using conservative concurrency for very large table", 
+			"original_concurrency", options.Concurrency,
+			"conservative_concurrency", conservativeConcurrency,
+			"item_count", metrics.ItemsTotal,
+			"reason", "reduce_throttling")
+		options.Concurrency = conservativeConcurrency
+	}
+
+	internal.Logger.Debug("Table analysis completed", 
 		"source_table", sourceTableName,
 		"dest_table", destTableName,
 		"estimated_items", metrics.ItemsTotal,
@@ -134,11 +171,16 @@ func (c *Cloner) CloneTable(ctx context.Context, sourceTableName, destTableName 
 	defer progressCancel()
 	
 	if metrics.ItemsTotal > 0 {
-		go c.monitorProgress(progressCtx, sourceTableName, metrics, options.ProgressCallback)
+		go c.monitorProgressWithSpinner(progressCtx, sourceTableName, metrics, options.ProgressCallback, showSpinner)
 	}
 
-	// Create channels with optimized buffer sizes
+	// Create channels with optimized buffer sizes for large tables
 	channelBuffer := options.Concurrency * options.BatchSize
+	// For large tables, increase buffer size to reduce blocking
+	if metrics.ItemsTotal > 50000 {
+		channelBuffer = channelBuffer * 2
+	}
+	
 	itemChan := make(chan map[string]types.AttributeValue, channelBuffer)
 	errorChan := make(chan error, options.Concurrency+1) // +1 for scanner
 
@@ -193,6 +235,9 @@ func (c *Cloner) CloneTable(ctx context.Context, sourceTableName, destTableName 
 	// Log comprehensive results
 	c.logCloneResults(metrics, totalDuration, cloneErr)
 
+	// Finish the DynamoDB cloning operation line
+	internal.FinishLine()
+
 	return cloneErr
 }
 
@@ -222,10 +267,14 @@ func (c *Cloner) GetItemCount(ctx context.Context, tableName string, filterExpre
 }
 
 func (c *Cloner) CloneTableStructure(ctx context.Context, sourceTableName, destTableName string) error {
+	return c.cloneTableStructureWithSpinner(ctx, sourceTableName, destTableName, true)
+}
+
+func (c *Cloner) cloneTableStructureWithSpinner(ctx context.Context, sourceTableName, destTableName string, showSpinner bool) error {
 	internal.Logger.Debug("Cloning table structure", "sourceTable", sourceTableName, "destTable", destTableName)
 
 	var spinner *internal.Spinner
-	if !internal.VerboseMode {
+	if !internal.VerboseMode && showSpinner {
 		spinner = internal.NewSpinner(fmt.Sprintf("Creating table structure for %s", destTableName))
 		spinner.Start()
 	}
@@ -272,6 +321,33 @@ func (c *Cloner) CloneTableStructure(ctx context.Context, sourceTableName, destT
 
 	_, err = c.DestClient.CreateTable(ctx, createInput)
 	if err != nil {
+		// Check if table already exists
+		if strings.Contains(err.Error(), "ResourceInUseException") && strings.Contains(err.Error(), "Table already exists") {
+			internal.Logger.Debug("Destination table already exists, skipping creation", "destTable", destTableName)
+			
+			// Wait for existing table to be available
+			if spinner != nil {
+				spinner.UpdateMessage(fmt.Sprintf("Table %s already exists, verifying availability", destTableName))
+			}
+			
+			waiter := dynamodb.NewTableExistsWaiter(c.DestClient)
+			err = waiter.Wait(ctx, &dynamodb.DescribeTableInput{
+				TableName: aws.String(destTableName),
+			}, 5*time.Minute)
+			
+			if err == nil {
+				if spinner != nil {
+					spinner.Success(fmt.Sprintf("Table structure ready: %s", destTableName))
+				}
+				internal.Logger.Debug("Existing table structure verified successfully")
+				return nil
+			} else {
+				if spinner != nil {
+					spinner.Error(fmt.Sprintf("Failed to verify existing table: %s", destTableName))
+				}
+				return fmt.Errorf("failed to verify existing table: %w", err)
+			}
+		}
 		return fmt.Errorf("failed to create destination table: %w", err)
 	}
 
@@ -300,9 +376,29 @@ func (c *Cloner) CloneTableStructure(ctx context.Context, sourceTableName, destT
 
 // getOptimalConcurrency determines optimal concurrency based on table characteristics
 func (c *Cloner) getOptimalConcurrency() int {
-	// Conservative default that works well for most tables
-	// Can be enhanced with table size analysis in the future
-	return 10
+	// High-performance default for better throughput
+	return 25
+}
+
+// getOptimalConcurrencyForTable determines optimal concurrency based on table size
+func (c *Cloner) getOptimalConcurrencyForTable(itemCount int64) int {
+	switch {
+	case itemCount > 100000:
+		// Very large tables (like your 138,300 records): Maximum parallelism
+		return 75
+	case itemCount > 50000:
+		// Large tables: High parallelism
+		return 50
+	case itemCount > 10000:
+		// Medium tables: Moderate-high parallelism
+		return 35
+	case itemCount > 1000:
+		// Small-medium tables: Moderate parallelism
+		return 25
+	default:
+		// Small tables: Conservative parallelism
+		return 15
+	}
 }
 
 // getOptimalBatchSize determines optimal batch size based on item characteristics
@@ -313,11 +409,22 @@ func (c *Cloner) getOptimalBatchSize() int {
 
 // monitorProgress provides real-time progress updates
 func (c *Cloner) monitorProgress(ctx context.Context, sourceTableName string, metrics *CloneMetrics, callback func(processed, total int64)) {
-	ticker := time.NewTicker(2 * time.Second)
+	c.monitorProgressWithSpinner(ctx, sourceTableName, metrics, callback, true)
+}
+
+// monitorProgressWithSpinner provides real-time progress updates with optional spinner
+func (c *Cloner) monitorProgressWithSpinner(ctx context.Context, sourceTableName string, metrics *CloneMetrics, callback func(processed, total int64), showSpinner bool) {
+	// For large tables, reduce monitoring frequency to improve performance
+	monitoringInterval := 2 * time.Second
+	if metrics.ItemsTotal > 50000 {
+		monitoringInterval = 5 * time.Second
+	}
+	
+	ticker := time.NewTicker(monitoringInterval)
 	defer ticker.Stop()
 
 	var spinner *internal.Spinner
-	if !internal.VerboseMode {
+	if !internal.VerboseMode && showSpinner {
 		spinner = internal.NewSpinner(fmt.Sprintf("Cloning DynamoDB table %s", sourceTableName))
 		spinner.Start()
 	}
@@ -386,10 +493,23 @@ func (c *Cloner) scanTableWithMetrics(ctx context.Context, sourceTableName strin
 	}
 
 	if options.FilterExpression == nil {
-		internal.Logger.Info("Using parallel scan for optimal performance", "segments", options.Concurrency)
-		return c.parallelScanWithMetrics(ctx, itemChan, input, options.Concurrency, metrics)
+		// For large tables, use more segments for better parallelism
+		segments := options.Concurrency
+		if metrics.ItemsTotal > 100000 {
+			// Use more segments for very large tables (up to 100 segments max)
+			segments = min(segments*2, 100)
+		} else if metrics.ItemsTotal > 50000 {
+			// Use moderately more segments for large tables
+			segments = min(segments+10, 50)
+		}
+		
+		internal.Logger.Debug("Using parallel scan for optimal performance", 
+			"segments", segments, 
+			"table_size", metrics.ItemsTotal,
+			"concurrency", options.Concurrency)
+		return c.parallelScanWithMetrics(ctx, itemChan, input, segments, metrics)
 	} else {
-		internal.Logger.Info("Using sequential scan with filter", "filter", *options.FilterExpression)
+		internal.Logger.Debug("Using sequential scan with filter", "filter", *options.FilterExpression)
 		return c.sequentialScanWithMetrics(ctx, itemChan, input, metrics)
 	}
 }
@@ -534,7 +654,7 @@ func (c *Cloner) writeItemsWithMetrics(ctx context.Context, destTableName string
 	return nil
 }
 
-// writeBatchWithMetrics enhances batch writing with retry logic and metrics
+// writeBatchWithMetrics enhances batch writing with aggressive retry logic for large tables
 func (c *Cloner) writeBatchWithMetrics(ctx context.Context, destTableName string, batch []types.WriteRequest, metrics *CloneMetrics, workerID, batchNum int) error {
 	input := &dynamodb.BatchWriteItemInput{
 		RequestItems: map[string][]types.WriteRequest{
@@ -542,8 +662,10 @@ func (c *Cloner) writeBatchWithMetrics(ctx context.Context, destTableName string
 		},
 	}
 
-	maxRetries := 5
-	backoff := 100 * time.Millisecond
+	// Increased retries for large tables with heavy throttling
+	maxRetries := 20
+	baseBackoff := 100 * time.Millisecond
+	maxBackoff := 30 * time.Second
 	originalBatchSize := len(batch)
 
 	for retry := 0; retry < maxRetries; retry++ {
@@ -553,19 +675,30 @@ func (c *Cloner) writeBatchWithMetrics(ctx context.Context, destTableName string
 
 		if err != nil {
 			atomic.AddInt64(&metrics.ErrorCount, 1)
+			
+			// Check if this is a throttling error
+			isThrottling := c.isThrottlingError(err)
+			if isThrottling {
+				atomic.AddInt64(&metrics.ThrottleCount, 1)
+				metrics.LastThrottleTime = time.Now()
+			}
+			
 			internal.Logger.Debug("Batch write error", 
 				"worker_id", workerID,
 				"batch_num", batchNum,
 				"retry", retry,
 				"error", err,
-				"duration", duration)
+				"duration", duration,
+				"is_throttling", isThrottling,
+				"total_throttles", atomic.LoadInt64(&metrics.ThrottleCount))
 			
 			if retry == maxRetries-1 {
 				return fmt.Errorf("batch write failed after %d retries: %w", maxRetries, err)
 			}
 			
+			// More aggressive backoff for throttling
+			backoff := c.calculateBackoff(baseBackoff, maxBackoff, retry, isThrottling, workerID)
 			time.Sleep(backoff)
-			backoff *= 2
 			continue
 		}
 
@@ -581,22 +714,62 @@ func (c *Cloner) writeBatchWithMetrics(ctx context.Context, destTableName string
 		}
 
 		atomic.AddInt64(&metrics.RetryCount, 1)
+		
+		// Calculate retry percentage for logging
+		retryPercentage := float64(len(unprocessed)) / float64(originalBatchSize) * 100
+		
 		internal.Logger.Debug("Retrying unprocessed items", 
 			"worker_id", workerID,
 			"batch_num", batchNum,
 			"retry", retry+1, 
 			"unprocessed", len(unprocessed),
-			"original_size", originalBatchSize)
+			"original_size", originalBatchSize,
+			"retry_percentage", fmt.Sprintf("%.1f%%", retryPercentage))
 
 		input.RequestItems[destTableName] = unprocessed
 		
-		// Exponential backoff with jitter
-		time.Sleep(backoff + time.Duration(workerID*10)*time.Millisecond)
-		backoff *= 2
+		// Adaptive backoff based on unprocessed percentage and retry count
+		isHighThrottling := retryPercentage > 50.0
+		backoff := c.calculateBackoff(baseBackoff, maxBackoff, retry, isHighThrottling, workerID)
+		time.Sleep(backoff)
 	}
 
 	return fmt.Errorf("failed to write batch after %d retries, %d items still unprocessed", 
 		maxRetries, len(input.RequestItems[destTableName]))
+}
+
+// isThrottlingError checks if the error is related to throttling
+func (c *Cloner) isThrottlingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "throttling") || 
+		   strings.Contains(errStr, "provisionedthroughputexceeded") ||
+		   strings.Contains(errStr, "requestlimitexceeded") ||
+		   strings.Contains(errStr, "throughputexceeded")
+}
+
+// calculateBackoff provides adaptive backoff based on error type and retry attempt
+func (c *Cloner) calculateBackoff(baseBackoff, maxBackoff time.Duration, retry int, isThrottling bool, workerID int) time.Duration {
+	// Base exponential backoff
+	backoff := baseBackoff * time.Duration(1<<uint(retry))
+	
+	// More aggressive backoff for throttling
+	if isThrottling {
+		backoff *= 3
+	}
+	
+	// Cap at maximum backoff
+	if backoff > maxBackoff {
+		backoff = maxBackoff
+	}
+	
+	// Add jitter to prevent thundering herd (spread workers across time)
+	jitter := time.Duration(workerID*100) * time.Millisecond
+	backoff += jitter
+	
+	return backoff
 }
 
 // estimateItemSize provides rough size estimation for metrics
@@ -646,14 +819,48 @@ func (c *Cloner) DiscoverTablesWithPrefix(ctx context.Context, prefix string) ([
 	return tables, nil
 }
 
+// CloneTablesWithPrefixInteractive discovers tables with prefix and allows interactive selection
+func (c *Cloner) CloneTablesWithPrefixInteractive(ctx context.Context, options CloneOptions) error {
+	if options.SourcePrefix == "" || options.DestPrefix == "" {
+		return fmt.Errorf("both SourcePrefix and DestPrefix must be specified for prefix-based cloning")
+	}
+	
+	// Discover source tables
+	var allTables []string
+	err := internal.SimpleSpinner(fmt.Sprintf("Discovering tables with prefix %s", options.SourcePrefix), func() error {
+		var discoverErr error
+		allTables, discoverErr = c.DiscoverTablesWithPrefix(ctx, options.SourcePrefix)
+		return discoverErr
+	})
+	if err != nil {
+		return fmt.Errorf("failed to discover source tables: %w", err)
+	}
+	
+	if len(allTables) == 0 {
+		internal.Logger.Warn("No tables found with specified prefix", "prefix", options.SourcePrefix)
+		return fmt.Errorf("no tables found with prefix: %s", options.SourcePrefix)
+	}
+	
+	// Interactive table selection
+	selector := internal.NewTableSelector(allTables)
+	selectedTables, err := selector.SelectTables()
+	if err != nil {
+		return fmt.Errorf("table selection failed: %w", err)
+	}
+	
+	internal.Logger.Debug("Selected tables for cloning", "count", len(selectedTables), "tables", selectedTables)
+	
+	// Clone only the selected tables
+	return c.cloneSelectedTables(ctx, selectedTables, options)
+}
+
 // CloneTablesWithPrefix clones all tables that match the source prefix to destination with new prefix
 func (c *Cloner) CloneTablesWithPrefix(ctx context.Context, options CloneOptions) error {
 	if options.SourcePrefix == "" || options.DestPrefix == "" {
 		return fmt.Errorf("both SourcePrefix and DestPrefix must be specified for prefix-based cloning")
 	}
 	
-	totalStart := time.Now()
-	internal.Logger.Info("Starting prefix-based DynamoDB clone", 
+	internal.Logger.Debug("Starting prefix-based DynamoDB clone", 
 		"source_prefix", options.SourcePrefix, 
 		"dest_prefix", options.DestPrefix)
 	
@@ -673,18 +880,25 @@ func (c *Cloner) CloneTablesWithPrefix(ctx context.Context, options CloneOptions
 		return fmt.Errorf("no tables found with prefix: %s", options.SourcePrefix)
 	}
 	
-	internal.Logger.Info("Found tables to clone", "count", len(sourceTables), "tables", sourceTables)
+	internal.Logger.Debug("Found tables to clone", "count", len(sourceTables), "tables", sourceTables)
 	
+	// Clone all discovered tables
+	return c.cloneSelectedTables(ctx, sourceTables, options)
+}
+
+// cloneSelectedTables handles the actual cloning logic for a list of selected tables
+func (c *Cloner) cloneSelectedTables(ctx context.Context, selectedTables []string, options CloneOptions) error {
+	totalStart := time.Now()
 	var totalItemsCloned int64
 	var totalErrors int64
 	
 	// Clone each table
-	for i, sourceTable := range sourceTables {
+	for i, sourceTable := range selectedTables {
 		// Generate destination table name by replacing prefix
 		destTable := strings.Replace(sourceTable, options.SourcePrefix+".", options.DestPrefix+".", 1)
 		
-		internal.Logger.Info("Cloning table", 
-			"progress", fmt.Sprintf("%d/%d", i+1, len(sourceTables)),
+		internal.Logger.Debug("Cloning table", 
+			"progress", fmt.Sprintf("%d/%d", i+1, len(selectedTables)),
 			"source_table", sourceTable, 
 			"dest_table", destTable)
 		
@@ -700,34 +914,38 @@ func (c *Cloner) CloneTablesWithPrefix(ctx context.Context, options CloneOptions
 			DestClient:   c.DestClient,
 		}
 		
-		// Clone table structure first
-		structureErr := tableCloner.CloneTableStructure(ctx, sourceTable, destTable)
-		if structureErr != nil {
-			internal.Logger.Error("Failed to clone table structure", 
-				"source_table", sourceTable,
-				"dest_table", destTable,
-				"error", structureErr)
+		// Clone table with progress indicator for the entire operation
+		err := internal.SimpleSpinner(fmt.Sprintf("Cloning table %s → %s (%d/%d)", sourceTable, destTable, i+1, len(selectedTables)), func() error {
+			// Clone table structure first (without showing spinner since we're already in one)
+			if structureErr := tableCloner.cloneTableStructureWithSpinner(ctx, sourceTable, destTable, false); structureErr != nil {
+				return fmt.Errorf("failed to create table structure: %w", structureErr)
+			}
+			
+			// Clone table data
+			tableOptions := options
+			tableOptions.ProgressCallback = func(processed, total int64) {
+				if options.ProgressCallback != nil {
+					// Aggregate progress across all tables
+					options.ProgressCallback(totalItemsCloned+processed, -1) // Total unknown for multiple tables
+				}
+			}
+			
+			if dataErr := tableCloner.cloneTableWithSpinner(ctx, sourceTable, destTable, tableOptions, false); dataErr != nil {
+				return fmt.Errorf("failed to clone table data: %w", dataErr)
+			}
+			
+			return nil
+		})
+		
+		if err != nil {
+			if internal.VerboseMode {
+				internal.Logger.Error("Failed to clone table", 
+					"source_table", sourceTable,
+					"dest_table", destTable,
+					"error", err)
+			}
 			totalErrors++
 			continue // Continue with next table
-		}
-		
-		// Clone table data
-		tableOptions := options
-		tableOptions.ProgressCallback = func(processed, total int64) {
-			if options.ProgressCallback != nil {
-				// Aggregate progress across all tables
-				options.ProgressCallback(totalItemsCloned+processed, -1) // Total unknown for multiple tables
-			}
-		}
-		
-		dataErr := tableCloner.CloneTable(ctx, sourceTable, destTable, tableOptions)
-		if dataErr != nil {
-			internal.Logger.Error("Failed to clone table data", 
-				"source_table", sourceTable,
-				"dest_table", destTable,
-				"error", dataErr)
-			totalErrors++
-			continue
 		}
 		
 		// Get item count for progress tracking (best effort)
@@ -735,10 +953,10 @@ func (c *Cloner) CloneTablesWithPrefix(ctx context.Context, options CloneOptions
 			totalItemsCloned += itemCount
 		}
 		
-		internal.Logger.Info("Table cloned successfully", 
+		internal.Logger.Debug("Table cloned successfully", 
 			"source_table", sourceTable,
 			"dest_table", destTable,
-			"progress", fmt.Sprintf("%d/%d", i+1, len(sourceTables)))
+			"progress", fmt.Sprintf("%d/%d", i+1, len(selectedTables)))
 	}
 	
 	totalDuration := time.Since(totalStart)
@@ -746,18 +964,21 @@ func (c *Cloner) CloneTablesWithPrefix(ctx context.Context, options CloneOptions
 	if totalErrors > 0 {
 		internal.Logger.Error("Prefix-based clone completed with errors", 
 			"total_duration", totalDuration,
-			"tables_processed", len(sourceTables),
+			"tables_processed", len(selectedTables),
 			"tables_failed", totalErrors,
 			"items_cloned", totalItemsCloned)
-		return fmt.Errorf("cloning completed with %d errors out of %d tables", totalErrors, len(sourceTables))
+		return fmt.Errorf("cloning completed with %d errors out of %d tables", totalErrors, len(selectedTables))
 	}
 	
-	internal.Logger.Info("Prefix-based clone completed successfully", 
+	internal.Logger.Debug("Prefix-based clone completed successfully", 
 		"total_duration", totalDuration,
-		"tables_cloned", len(sourceTables),
+		"tables_cloned", len(selectedTables),
 		"total_items_cloned", totalItemsCloned,
 		"source_prefix", options.SourcePrefix,
 		"dest_prefix", options.DestPrefix)
+	
+	// Finish the prefix-based cloning operation line
+	internal.FinishLine()
 	
 	return nil
 }
@@ -770,6 +991,7 @@ func (c *Cloner) logCloneResults(metrics *CloneMetrics, duration time.Duration, 
 			"items_total", metrics.ItemsTotal,
 			"error_count", metrics.ErrorCount,
 			"retry_count", metrics.RetryCount,
+			"throttle_count", metrics.ThrottleCount,
 			"error", err)
 		return
 	}
@@ -779,7 +1001,7 @@ func (c *Cloner) logCloneResults(metrics *CloneMetrics, duration time.Duration, 
 		successRate = 100 // Unknown total, assume success if no errors
 	}
 
-	internal.Logger.Info("DynamoDB clone completed successfully",
+	internal.Logger.Debug("DynamoDB clone completed successfully",
 		"duration", duration,
 		"items_processed", metrics.ItemsProcessed,
 		"items_total", metrics.ItemsTotal,
@@ -789,6 +1011,7 @@ func (c *Cloner) logCloneResults(metrics *CloneMetrics, duration time.Duration, 
 		"total_bytes_processed", metrics.BytesProcessed,
 		"batches_written", metrics.BatchesWritten,
 		"error_count", metrics.ErrorCount,
-		"retry_count", metrics.RetryCount)
+		"retry_count", metrics.RetryCount,
+		"throttle_count", metrics.ThrottleCount)
 }
 

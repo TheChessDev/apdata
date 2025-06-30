@@ -75,18 +75,29 @@ func (s *Spinner) Stop() {
 
 func (s *Spinner) Success(message string) {
 	s.Stop()
-	fmt.Fprintf(s.writer, "\r✅ %s\n", message)
+	fmt.Fprintf(s.writer, "\r✅ %s", message)
+	if f, ok := s.writer.(*os.File); ok {
+		f.Sync()
+	}
 }
 
 func (s *Spinner) Error(message string) {
 	s.Stop()
-	fmt.Fprintf(s.writer, "\r❌ %s\n", message)
+	fmt.Fprintf(s.writer, "\r❌ %s", message)
+	if f, ok := s.writer.(*os.File); ok {
+		f.Sync()
+	}
 }
 
 func (s *Spinner) UpdateMessage(message string) {
 	s.mu.Lock()
 	s.message = message
 	s.mu.Unlock()
+}
+
+func (s *Spinner) Finish() {
+	s.Stop()
+	fmt.Fprint(s.writer, "\n")
 }
 
 func (s *Spinner) clearLine() {
@@ -98,6 +109,26 @@ func WithSpinner(message string, operation func() error) error {
 }
 
 func WithSpinnerConditional(message string, operation func() error, showSpinner bool) error {
+	if !showSpinner {
+		return operation()
+	}
+	
+	spinner := NewSpinner(message)
+	spinner.Start()
+	
+	err := operation()
+	
+	if err != nil {
+		spinner.Error(fmt.Sprintf("Failed: %s", message))
+		return err
+	}
+	
+	spinner.Success(message)
+	return nil
+}
+
+// WithSpinnerConditionalNoNewline is like WithSpinnerConditional but doesn't add a newline
+func WithSpinnerConditionalNoNewline(message string, operation func() error, showSpinner bool) error {
 	if !showSpinner {
 		return operation()
 	}
