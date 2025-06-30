@@ -153,16 +153,16 @@ To add your own configurations, edit `~/.apdata/config.json` and add entries fol
 
 ```bash
 # Clone MySQL data with prefix-based table discovery
-./apdata clone mysql --source acme/dev --dest julian/dev
+./apdata clone mysql --source acme/dev --dest my-client/dev
 
 # Clone DynamoDB data with prefix-based table discovery
-./apdata clone dynamodb --source acme/dev --dest julian/dev
+./apdata clone dynamodb --source acme/dev --dest my-client/dev
 
 # Clone DynamoDB data for a specific component with interactive selection
-./apdata clone dynamodb --source acme/dev --dest julian/dev --component-name my-service --interactive
+./apdata clone dynamodb --source acme/dev --dest my-client/dev --component-name my-service --interactive
 
 # Clone both MySQL and DynamoDB with prefix mapping
-./apdata clone all --source acme/dev --dest julian/dev
+./apdata clone all --source acme/dev --dest my-client/dev
 ```
 
 ### Prefix-Based Cloning
@@ -171,13 +171,13 @@ The tool automatically detects when you're cloning between different client/envi
 
 **MySQL**: Finds all tables starting with `client_environment_*` and clones them to `newclient_newenvironment_*`
 
-- Example: `acme_dev_users` → `julian_dev_users`
-- Example: `acme_dev_orders` → `julian_dev_orders`
+- Example: `acme_dev_users` → `my-client_dev_users`
+- Example: `acme_dev_orders` → `my-client_dev_orders`
 
 **DynamoDB**: Finds all tables starting with `client.environment.*` and clones them to `newclient.newenvironment.*`
 
-- Example: `acme.dev.users` → `julian.dev.users`
-- Example: `acme.dev.sessions` → `julian.dev.sessions`
+- Example: `acme.dev.users` → `my-client.dev.users`
+- Example: `acme.dev.sessions` → `my-client.dev.sessions`
 
 ### Component-Based Cloning with Interactive Selection
 
@@ -185,7 +185,7 @@ For more granular control, you can specify a component name and use interactive 
 
 ```bash
 # Interactive checkbox selection for a specific component
-./apdata clone dynamodb --source acme/dev --dest julian/dev --component-name my-component --interactive
+./apdata clone dynamodb --source acme/dev --dest my-client/dev --component-name my-component --interactive
 ```
 
 This will:
@@ -203,11 +203,11 @@ This will:
 Use ↑/↓ to navigate, SPACE to select/deselect, ENTER to confirm
 
 ? Select tables to clone: [Use arrows to move, space to select, <enter> to submit]
-❯ ⬜ julian.dev.connectors-data-api.users
-  ⬜ julian.dev.connectors-data-api.sessions
-  ✅ julian.dev.connectors-data-api.logs
-  ⬜ julian.dev.connectors-data-api.metrics
-  ⬜ julian.dev.connectors-data-api.cache
+❯ ⬜ my-client.dev.my-component.users
+  ⬜ my-client.dev.my-component.sessions
+  ✅ my-client.dev.my-component.logs
+  ⬜ my-client.dev.my-component.metrics
+  ⬜ my-client.dev.my-component.cache
 ```
 
 ### Advanced MySQL Options
@@ -306,19 +306,19 @@ Use ↑/↓ to navigate, SPACE to select/deselect, ENTER to confirm
 
 ```bash
 # Interactive selection for component-specific tables
-./apdata clone dynamodb --source acme/dev --dest julian/dev --component-name connectors-data-api --interactive
+./apdata clone dynamodb --source acme/dev --dest my-client/dev --component-name connectors-data-api --interactive
 
-# Clone all acme.dev.* DynamoDB tables to julian.dev.*
-./apdata clone dynamodb --source acme/dev --dest julian/dev --verbose
+# Clone all acme.dev.* DynamoDB tables to my-client.dev.*
+./apdata clone dynamodb --source acme/dev --dest my-client/dev --verbose
 
-# Clone all acme_dev_* MySQL tables to julian_dev_*
-./apdata clone mysql --source acme/dev --dest julian/dev --verbose
+# Clone all acme_dev_* MySQL tables to my-client_dev_*
+./apdata clone mysql --source acme/dev --dest my-client/dev --verbose
 
 # Clone both databases with prefix mapping
-./apdata clone all --source acme/dev --dest julian/dev --verbose
+./apdata clone all --source acme/dev --dest my-client/dev --verbose
 
 # Apply filters during prefix-based cloning
-./apdata clone dynamodb --source acme/dev --dest julian/dev --filter "attribute_exists(active)"
+./apdata clone dynamodb --source acme/dev --dest my-client/dev --filter "attribute_exists(active)"
 ```
 
 ### Multi-Database Examples
