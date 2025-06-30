@@ -2,14 +2,24 @@ package mysql
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	"apdata/internal"
+
 	_ "github.com/go-sql-driver/mysql"
 )
+
+type TableExistsError struct {
+	Message string
+}
+
+func (e *TableExistsError) Error() string {
+	return e.Message
+}
 
 type Config struct {
 	Host     string
@@ -32,6 +42,16 @@ func NewCloner(source, dest Config) *Cloner {
 }
 
 func (c *Cloner) CloneSchema() error {
+	return c.CloneSchemaWithOptions(false)
+}
+
+func (c *Cloner) CloneSchemaWithOptions(dropFirst bool) error {
+	if dropFirst {
+		if err := c.recreateDatabase(); err != nil {
+			return fmt.Errorf("failed to recreate database: %w", err)
+		}
+	}
+
 	args := []string{
 		"--no-data",
 		"--skip-add-drop-table",
@@ -53,7 +73,7 @@ func (c *Cloner) CloneSchema() error {
 	internal.Logger.Debug("Exporting MySQL schema", "database", c.Source.Database, "host", c.Source.Host)
 
 	schemaFile := fmt.Sprintf("%s_schema.sql", c.Source.Database)
-	
+
 	err := internal.SimpleSpinner(fmt.Sprintf("Exporting schema from %s", c.Source.Database), func() error {
 		file, err := os.Create(schemaFile)
 		if err != nil {
@@ -64,7 +84,7 @@ func (c *Cloner) CloneSchema() error {
 		cmd.Stdout = file
 		return cmd.Run()
 	})
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to export schema: %w", err)
 	}
@@ -72,9 +92,20 @@ func (c *Cloner) CloneSchema() error {
 	internal.Logger.Debug("Schema exported successfully", "file", schemaFile)
 	internal.Logger.Debug("Importing schema to destination", "host", c.Dest.Host, "database", c.Dest.Database)
 
-	return internal.SimpleSpinner(fmt.Sprintf("Importing schema to %s", c.Dest.Database), func() error {
+	err = internal.SimpleSpinner(fmt.Sprintf("Importing schema to %s", c.Dest.Database), func() error {
 		return c.importSQL(schemaFile)
 	})
+
+	if err != nil {
+		var tableExistsErr *TableExistsError
+		if errors.As(err, &tableExistsErr) {
+			internal.Logger.Info("Tables already exist, recreating database and retrying...")
+			return c.CloneSchemaWithOptions(true)
+		}
+		return fmt.Errorf("failed to import schema: %w", err)
+	}
+
+	return nil
 }
 
 func (c *Cloner) CloneData(tables []string) error {
@@ -272,9 +303,16 @@ func (c *Cloner) importSQL(filename string) error {
 	defer file.Close()
 
 	cmd.Stdin = file
-	cmd.Stderr = os.Stderr
+
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to import SQL: %w", err)
+		stderrStr := stderr.String()
+		if strings.Contains(stderrStr, "already exists") || strings.Contains(stderrStr, "42S01") {
+			return &TableExistsError{Message: stderrStr}
+		}
+		return fmt.Errorf("failed to import SQL: %w\nMySQL Error: %s", err, stderrStr)
 	}
 
 	internal.Logger.Debug("SQL file imported successfully", "file", filename)
@@ -299,6 +337,38 @@ func (c *Cloner) importTableData(filename string) error {
 	defer os.Remove(tempFile)
 
 	return c.importSQL(tempFile)
+}
+
+func (c *Cloner) recreateDatabase() error {
+	return internal.SimpleSpinner(fmt.Sprintf("Recreating database %s", c.Dest.Database), func() error {
+		var dsn string
+		if c.Dest.Password != "" {
+			dsn = fmt.Sprintf("%s:%s@tcp(%s:%d)/",
+				c.Dest.User, c.Dest.Password, c.Dest.Host, c.Dest.Port)
+		} else {
+			dsn = fmt.Sprintf("%s@tcp(%s:%d)/",
+				c.Dest.User, c.Dest.Host, c.Dest.Port)
+		}
+		db, err := sql.Open("mysql", dsn)
+		if err != nil {
+			return fmt.Errorf("failed to connect to MySQL: %w", err)
+		}
+		defer db.Close()
+
+		internal.Logger.Debug("Dropping database", "database", c.Dest.Database)
+		_, err = db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", c.Dest.Database))
+		if err != nil {
+			return fmt.Errorf("failed to drop database: %w", err)
+		}
+
+		internal.Logger.Debug("Creating database", "database", c.Dest.Database)
+		_, err = db.Exec(fmt.Sprintf("CREATE DATABASE `%s`", c.Dest.Database))
+		if err != nil {
+			return fmt.Errorf("failed to create database: %w", err)
+		}
+
+		return nil
+	})
 }
 
 func (c *Cloner) getAllTables() ([]string, error) {

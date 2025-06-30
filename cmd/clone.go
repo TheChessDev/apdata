@@ -15,10 +15,12 @@ import (
 )
 
 var cloneCmd = &cobra.Command{
-	Use:   "clone [mysql|dynamodb|all]",
-	Short: "Clone data from cloud to local",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runClone,
+	Use:           "clone [mysql|dynamodb|all]",
+	Short:         "Clone data from cloud to local",
+	Args:          cobra.ExactArgs(1),
+	RunE:          runClone,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 func runClone(cmd *cobra.Command, args []string) error {
@@ -57,17 +59,43 @@ func runClone(cmd *cobra.Command, args []string) error {
 
 	switch cloneType {
 	case "mysql":
-		return cloneMySQLData(cfg, source, dest, table, whereClause, schemaOnly, dataOnly)
+		if err := cloneMySQLData(cfg, source, dest, table, whereClause, schemaOnly, dataOnly); err != nil {
+			return formatError(err)
+		}
 	case "dynamodb":
-		return cloneDynamoDBData(cfg, source, dest, table, filter, concurrency)
+		if err := cloneDynamoDBData(cfg, source, dest, table, filter, concurrency); err != nil {
+			return formatError(err)
+		}
 	case "all":
 		if err := cloneMySQLData(cfg, source, dest, table, whereClause, schemaOnly, dataOnly); err != nil {
-			return err
+			return formatError(err)
 		}
-		return cloneDynamoDBData(cfg, source, dest, table, filter, concurrency)
+		if err := cloneDynamoDBData(cfg, source, dest, table, filter, concurrency); err != nil {
+			return formatError(err)
+		}
 	default:
-		return fmt.Errorf("unsupported clone type: %s", cloneType)
+		return formatError(fmt.Errorf("unsupported clone type: %s", cloneType))
 	}
+
+	return nil
+}
+
+func formatError(err error) error {
+	errStr := err.Error()
+
+	if strings.Contains(errStr, "connection refused") {
+		return fmt.Errorf("❌ Cannot connect to MySQL server. Please check your connection settings.")
+	}
+
+	if strings.Contains(errStr, "Access denied") {
+		return fmt.Errorf("❌ MySQL authentication failed. Please check your username and password.")
+	}
+
+	if strings.Contains(errStr, "Unknown database") {
+		return fmt.Errorf("❌ Database does not exist. Please check your database name.")
+	}
+
+	return fmt.Errorf("❌ %s", errStr)
 }
 
 func cloneMySQLData(cfg *config.Config, source, dest, table, whereClause string, schemaOnly, dataOnly bool) error {
