@@ -213,3 +213,35 @@ To add your own configurations, edit `~/.apdata/config.json` and add entries fol
 # Clone between different clients
 ./apdata clone mysql --source acme/prod --dest beta/staging
 ```
+
+## Testing
+
+The project includes a comprehensive test suite covering all modules with 35+ tests.
+
+### Running Tests
+
+```bash
+# Run all tests
+go test ./...
+
+# Run with verbose output
+go test ./... -v
+
+# Run specific package
+go test ./mysql -v
+go test ./config -v
+go test ./internal -v
+
+# Run specific test
+go test ./config -run TestParseConnectionString
+```
+
+### Test Coverage
+
+- **MySQL Module**: Connection handling, schema operations, error detection
+- **Config Module**: Connection string parsing, configuration management  
+- **Internal Module**: Spinner functionality, verbose mode behavior
+- **Command Module**: CLI validation, error formatting
+- **Integration Tests**: End-to-end component interaction
+
+All tests work without external dependencies and include proper cleanup and state management.

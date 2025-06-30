@@ -2,24 +2,14 @@ package mysql
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	"apdata/internal"
-
 	_ "github.com/go-sql-driver/mysql"
 )
-
-type TableExistsError struct {
-	Message string
-}
-
-func (e *TableExistsError) Error() string {
-	return e.Message
-}
 
 type Config struct {
 	Host     string
@@ -87,20 +77,9 @@ func (c *Cloner) CloneSchema() error {
 	internal.Logger.Debug("Schema exported successfully", "file", schemaFile)
 	internal.Logger.Debug("Importing schema to destination", "host", c.Dest.Host, "database", c.Dest.Database)
 
-	err = internal.SimpleSpinner(fmt.Sprintf("Importing schema to %s", c.Dest.Database), func() error {
+	return internal.SimpleSpinner(fmt.Sprintf("Importing schema to %s", c.Dest.Database), func() error {
 		return c.importSQL(schemaFile)
 	})
-
-	if err != nil {
-		var tableExistsErr *TableExistsError
-		if errors.As(err, &tableExistsErr) {
-			internal.Logger.Info("Tables already exist, recreating database and retrying...")
-			return c.CloneSchemaWithOptions(true)
-		}
-		return fmt.Errorf("failed to import schema: %w", err)
-	}
-
-	return nil
 }
 
 func (c *Cloner) CloneData(tables []string) error {
@@ -298,16 +277,10 @@ func (c *Cloner) importSQL(filename string) error {
 	defer file.Close()
 
 	cmd.Stdin = file
-
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
+	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		stderrStr := stderr.String()
-		if strings.Contains(stderrStr, "already exists") || strings.Contains(stderrStr, "42S01") {
-			return &TableExistsError{Message: stderrStr}
-		}
-		return fmt.Errorf("failed to import SQL: %w\nMySQL Error: %s", err, stderrStr)
+		return fmt.Errorf("failed to import SQL: %w", err)
 	}
 
 	internal.Logger.Debug("SQL file imported successfully", "file", filename)

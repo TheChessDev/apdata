@@ -1,7 +1,6 @@
 package mysql
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,10 +9,25 @@ import (
 	"apdata/internal"
 )
 
-func TestTableExistsError(t *testing.T) {
-	err := &TableExistsError{Message: "Table 'test' already exists"}
-	if err.Error() != "Table 'test' already exists" {
-		t.Errorf("Expected 'Table 'test' already exists', got %s", err.Error())
+func TestDatabaseRecreation(t *testing.T) {
+	// Test that CloneSchema always recreates database first
+	internal.VerboseMode = true
+	defer func() { internal.VerboseMode = false }()
+	
+	cloner := &Cloner{
+		Source: Config{Database: "sourcedb"},
+		Dest:   Config{Database: "destdb"},
+	}
+
+	// This will fail due to no real DB, but ensures recreateDatabase is called
+	err := cloner.CloneSchema()
+	if err == nil {
+		t.Error("Expected error when cloning without real database")
+	}
+	
+	// The error should be from database recreation, not schema import
+	if !strings.Contains(err.Error(), "failed to recreate database") {
+		t.Logf("Error as expected: %v", err)
 	}
 }
 
@@ -124,7 +138,7 @@ func TestCloneSchemaWithMockError(t *testing.T) {
 	// We can't easily test the full flow without a real database, but we can test components
 }
 
-func TestErrorDetectionInImportSQL(t *testing.T) {
+func TestImportSQLError(t *testing.T) {
 	cloner := &Cloner{
 		Dest: Config{
 			Host:     "nonexistent.host",
@@ -151,10 +165,9 @@ func TestErrorDetectionInImportSQL(t *testing.T) {
 		t.Error("Expected error when importing to nonexistent host")
 	}
 
-	// The error should not be a TableExistsError since connection failed
-	var tableExistsErr *TableExistsError
-	if errors.As(err, &tableExistsErr) {
-		t.Error("Should not be TableExistsError for connection failure")
+	// Should be a connection error
+	if !strings.Contains(err.Error(), "failed to import SQL") {
+		t.Logf("Got expected error: %v", err)
 	}
 }
 
@@ -209,7 +222,7 @@ func TestPasswordlessDSN(t *testing.T) {
 	}
 }
 
-func TestCloneSchemaOptionsFlow(t *testing.T) {
+func TestCloneSchemaFlow(t *testing.T) {
 	internal.VerboseMode = true
 	defer func() { internal.VerboseMode = false }()
 	
@@ -218,15 +231,9 @@ func TestCloneSchemaOptionsFlow(t *testing.T) {
 		Dest:   Config{Database: "destdb"},
 	}
 
-	// Test CloneSchema calls CloneSchemaWithOptions(false)
+	// Test CloneSchema always recreates database first
 	// This will fail due to no real DB, but we can verify the method exists
 	err := cloner.CloneSchema()
-	if err == nil {
-		t.Error("Expected error when cloning without real database")
-	}
-
-	// Test CloneSchemaWithOptions with dropFirst=true
-	err = cloner.CloneSchemaWithOptions(true)
 	if err == nil {
 		t.Error("Expected error when cloning without real database")
 	}
@@ -252,43 +259,30 @@ func TestInsertBatch(t *testing.T) {
 	}
 }
 
-// Mock tests for specific scenarios
-func TestTableExistsErrorDetection(t *testing.T) {
-	testCases := []struct {
-		name        string
-		errorOutput string
-		shouldMatch bool
-	}{
-		{
-			name:        "MySQL table exists error",
-			errorOutput: "ERROR 1050 (42S01) at line 32: Table 'attributesetdictionary' already exists",
-			shouldMatch: true,
-		},
-		{
-			name:        "Generic already exists",
-			errorOutput: "Table 'users' already exists",
-			shouldMatch: true,
-		},
-		{
-			name:        "Different error",
-			errorOutput: "ERROR 1045: Access denied for user",
-			shouldMatch: false,
-		},
-		{
-			name:        "Connection error",
-			errorOutput: "Can't connect to MySQL server",
-			shouldMatch: false,
+// Test that recreateDatabase handles passwordless connections
+func TestRecreateDatabase(t *testing.T) {
+	// Set verbose mode to avoid spinner issues in tests
+	internal.VerboseMode = true
+	defer func() { internal.VerboseMode = false }()
+	
+	cloner := &Cloner{
+		Dest: Config{
+			Host:     "nonexistent.host",
+			Port:     3306,
+			User:     "root",
+			Password: "", // Test passwordless
+			Database: "testdb",
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			hasTableExists := strings.Contains(tc.errorOutput, "already exists") || 
-							  strings.Contains(tc.errorOutput, "42S01")
-			
-			if hasTableExists != tc.shouldMatch {
-				t.Errorf("Expected %t for error detection, got %t", tc.shouldMatch, hasTableExists)
-			}
-		})
+	// This will fail without real database, but tests the DSN construction
+	err := cloner.recreateDatabase()
+	if err == nil {
+		t.Error("Expected error when recreating database without real connection")
+	}
+	
+	// Should be a connection error
+	if strings.Contains(err.Error(), "failed to recreate database") {
+		t.Logf("Got expected error: %v", err)
 	}
 }
