@@ -30,16 +30,13 @@ func SimpleSpinner(message string, operation func() error) error {
 		}
 	}()
 
-	// Run the operation in another goroutine
 	go func() {
 		errCh <- operation()
 	}()
 
-	// Wait for operation to complete
 	err := <-errCh
 	done <- true
 
-	// Clear the spinner line and show result
 	fmt.Print("\r\033[K")
 	if err != nil {
 		fmt.Printf("❌ Failed: %s", message)
@@ -51,7 +48,6 @@ func SimpleSpinner(message string, operation func() error) error {
 	return err
 }
 
-// FinishLine moves to the next line after a series of related operations
 func FinishLine() {
 	if !VerboseMode {
 		fmt.Print("\n")

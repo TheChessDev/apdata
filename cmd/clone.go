@@ -61,27 +61,22 @@ func runClone(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("both --source and --dest are required")
 	}
 
-	// Validate interactive flag usage
 	if interactive && componentName == "" {
 		return fmt.Errorf("--interactive flag can only be used with --component-name")
 	}
 
-	// Validate table flag usage - only allow with MySQL
 	if table != "" && (cloneType == "dynamodb" || cloneType == "all") {
 		return fmt.Errorf("--table flag is only supported for MySQL. For DynamoDB, use --component-name with --interactive for table selection")
 	}
 
-	// Validate component-name flag usage - only allow with DynamoDB
 	if componentName != "" && cloneType == "mysql" {
 		return fmt.Errorf("--component-name flag is only supported for DynamoDB. For MySQL, use --table for specific tables or omit for all tables")
 	}
 
-	// Validate filter flag usage - only allow with DynamoDB
 	if filter != "" && cloneType == "mysql" {
 		return fmt.Errorf("--filter flag is only supported for DynamoDB. For MySQL, use --where for filtering records")
 	}
 
-	// Validate where flag usage - only allow with MySQL and --table
 	if whereClause != "" {
 		if cloneType != "mysql" {
 			return fmt.Errorf("--where flag is only supported for MySQL. For DynamoDB, use --filter for filtering records")
@@ -128,7 +123,6 @@ func runClone(cmd *cobra.Command, args []string) error {
 func formatError(err error) error {
 	errStr := err.Error()
 
-	// AWS/DynamoDB specific errors
 	if strings.Contains(errStr, "AWS credentials") || strings.Contains(errStr, "aws configure") {
 		return fmt.Errorf("❌ AWS credentials not configured. Please run 'aws configure' or set AWS environment variables.")
 	}
@@ -141,7 +135,6 @@ func formatError(err error) error {
 		return fmt.Errorf("❌ AWS permissions denied. Please ensure your AWS credentials have DynamoDB access permissions.")
 	}
 
-	// MySQL specific errors
 	if strings.Contains(errStr, "connection refused") {
 		return fmt.Errorf("❌ Cannot connect to MySQL server. Please check your connection settings.")
 	}
@@ -189,9 +182,7 @@ func cloneMySQLData(cfg *config.Config, source, dest, table, whereClause string,
 		internal.Logger.Info("MySQL clone completed", "duration", time.Since(start))
 	}()
 
-	// MySQL clones exact table names without any prefix logic
 	if !dataOnly {
-		// Only clone full schema if we're not targeting a specific table
 		if table == "" {
 			internal.Logger.Info("Cloning MySQL schema")
 			if err := cloner.CloneSchema(); err != nil {
@@ -204,7 +195,6 @@ func cloneMySQLData(cfg *config.Config, source, dest, table, whereClause string,
 		internal.Logger.Info("Cloning MySQL data")
 
 		if whereClause != "" && table != "" {
-			// For filtered single table clone, ensure table exists with correct schema
 			if err := cloner.EnsureTableExists(table); err != nil {
 				return fmt.Errorf("failed to ensure table exists: %w", err)
 			}
@@ -212,7 +202,6 @@ func cloneMySQLData(cfg *config.Config, source, dest, table, whereClause string,
 				return fmt.Errorf("failed to clone table with filter: %w", err)
 			}
 		} else if table != "" {
-			// For single table clone, ensure table exists with correct schema
 			if err := cloner.EnsureTableExists(table); err != nil {
 				return fmt.Errorf("failed to ensure table exists: %w", err)
 			}
@@ -220,7 +209,6 @@ func cloneMySQLData(cfg *config.Config, source, dest, table, whereClause string,
 				return fmt.Errorf("failed to clone table: %w", err)
 			}
 		} else {
-			// Full database clone
 			if err := cloner.CloneData(nil); err != nil {
 				return fmt.Errorf("failed to clone data: %w", err)
 			}
@@ -258,22 +246,18 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, componentName, f
 
 	ctx := context.Background()
 
-	// Check if we should do prefix-based cloning or single table cloning
 	sourcePrefix := fmt.Sprintf("%s.%s", sourceConn.Client, sourceConn.Env)
 	destPrefix := fmt.Sprintf("%s.%s", destConn.Client, destConn.Env)
 	
-	// Add component name to prefix if provided
 	if componentName != "" {
 		sourcePrefix = fmt.Sprintf("%s.%s", sourcePrefix, componentName)
 		destPrefix = fmt.Sprintf("%s.%s", destPrefix, componentName)
 	}
 	
-	// DynamoDB only supports prefix-based cloning now (no specific table names)
 	internal.Logger.Debug("Starting prefix-based DynamoDB clone", 
 		"source_prefix", sourcePrefix, 
 		"dest_prefix", destPrefix)
 	
-	// Create cloner for prefix-based operations (table names will be set dynamically)
 	cloner, err := dynamodb.NewCloner(*sourceConfig, *destConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create DynamoDB cloner: %w", err)
@@ -287,11 +271,9 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, componentName, f
 	}
 
 	if filter != "" {
-		// Process the filter expression and automatically bind simple values
 		processedFilter, attributeValues, err := processFilterExpression(filter)
 		if err != nil {
 			internal.Logger.Warn("Filter expression processing warning", "filter", filter, "error", err)
-			// Fall back to original filter
 			options.FilterExpression = &filter
 		} else {
 			options.FilterExpression = &processedFilter
@@ -306,7 +288,6 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, componentName, f
 		}
 	}
 
-	// Use interactive mode if requested and component name is provided
 	if interactive && componentName != "" {
 		if err := cloner.CloneTablesWithPrefixInteractive(ctx, options); err != nil {
 			return fmt.Errorf("failed to clone DynamoDB tables with interactive selection: %w", err)
@@ -320,37 +301,30 @@ func cloneDynamoDBData(cfg *config.Config, source, dest, table, componentName, f
 	return nil
 }
 
-// processFilterExpression automatically processes simple filter expressions and binds values
 func processFilterExpression(filter string) (string, map[string]types.AttributeValue, error) {
 	
-	// Handle common patterns like: AttributeName = 'value' or AttributeName = "value"
-	// Convert to: AttributeName = :attrX format with bound values
 	
 	attributeValues := make(map[string]types.AttributeValue)
 	processedFilter := filter
 	valueCounter := 1
 	
-	// Pattern: AttributeName = 'value' or AttributeName = "value"
 	patterns := []struct {
 		regex   string
 		handler func(matches []string) (string, types.AttributeValue)
 	}{
 		{
-			// Pattern: word = 'string_value'
 			regex: `(\w+)\s*=\s*'([^']*)'`,
 			handler: func(matches []string) (string, types.AttributeValue) {
 				return matches[2], &types.AttributeValueMemberS{Value: matches[2]}
 			},
 		},
 		{
-			// Pattern: word = "string_value"
 			regex: `(\w+)\s*=\s*"([^"]*)"`,
 			handler: func(matches []string) (string, types.AttributeValue) {
 				return matches[2], &types.AttributeValueMemberS{Value: matches[2]}
 			},
 		},
 		{
-			// Pattern: word = number
 			regex: `(\w+)\s*=\s*(\d+(?:\.\d+)?)`,
 			handler: func(matches []string) (string, types.AttributeValue) {
 				return matches[2], &types.AttributeValueMemberN{Value: matches[2]}
@@ -367,11 +341,9 @@ func processFilterExpression(filter string) (string, map[string]types.AttributeV
 				attributeName := match[1]
 				_, attributeValue := pattern.handler(match)
 				
-				// Create a parameter name
 				paramName := fmt.Sprintf(":val%d", valueCounter)
 				attributeValues[paramName] = attributeValue
 				
-				// Replace in the filter
 				originalExpression := match[0]
 				newExpression := fmt.Sprintf("%s = %s", attributeName, paramName)
 				processedFilter = strings.Replace(processedFilter, originalExpression, newExpression, 1)

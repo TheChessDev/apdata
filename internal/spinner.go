@@ -127,7 +127,6 @@ func WithSpinnerConditional(message string, operation func() error, showSpinner 
 	return nil
 }
 
-// WithSpinnerConditionalNoNewline is like WithSpinnerConditional but doesn't add a newline
 func WithSpinnerConditionalNoNewline(message string, operation func() error, showSpinner bool) error {
 	if !showSpinner {
 		return operation()

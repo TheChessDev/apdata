@@ -49,7 +49,6 @@ func TestFormatErrorPreservesOriginalMessage(t *testing.T) {
 	originalErr := &mockError{"connection refused: detailed message"}
 	formatted := formatError(originalErr)
 	
-	// Should contain the specific helpful message
 	if !strings.Contains(formatted.Error(), "Cannot connect to MySQL server") {
 		t.Error("Should contain helpful connection message")
 	}
@@ -87,8 +86,6 @@ func TestRunCloneValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// We can't easily test the full runClone function without mocking
-			// the entire config and database setup, but we can test the type validation
 			cloneType := tt.args[0]
 			
 			validTypes := map[string]bool{
@@ -111,7 +108,6 @@ func TestRunCloneValidation(t *testing.T) {
 }
 
 func TestCloneCommandConfiguration(t *testing.T) {
-	// Test that the command is configured correctly
 	if cloneCmd.Use != "clone [mysql|dynamodb|all]" {
 		t.Errorf("Expected Use to be 'clone [mysql|dynamodb|all]', got '%s'", cloneCmd.Use)
 	}
@@ -132,7 +128,6 @@ func TestCloneCommandConfiguration(t *testing.T) {
 func TestCloneCommandFlags(t *testing.T) {
 	flags := cloneCmd.Flags()
 	
-	// Test required flags
 	requiredFlags := []string{"source", "dest"}
 	for _, flagName := range requiredFlags {
 		flag := flags.Lookup(flagName)
@@ -141,7 +136,6 @@ func TestCloneCommandFlags(t *testing.T) {
 		}
 	}
 	
-	// Test optional flags
 	optionalFlags := []string{
 		"table", "filter", "where", "schema-only", 
 		"data-only", "concurrency", "verbose",
@@ -153,13 +147,11 @@ func TestCloneCommandFlags(t *testing.T) {
 		}
 	}
 	
-	// Test flag types
 	concurrencyFlag := flags.Lookup("concurrency")
 	if concurrencyFlag != nil && concurrencyFlag.DefValue != "25" {
 		t.Errorf("Expected concurrency default to be '25', got '%s'", concurrencyFlag.DefValue)
 	}
 	
-	// Test boolean flags
 	boolFlags := []string{"schema-only", "data-only", "verbose"}
 	for _, flagName := range boolFlags {
 		flag := flags.Lookup(flagName)
@@ -169,7 +161,6 @@ func TestCloneCommandFlags(t *testing.T) {
 	}
 }
 
-// Mock error type for testing
 type mockError struct {
 	message string
 }

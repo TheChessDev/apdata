@@ -8,14 +8,11 @@ import (
 	"github.com/AlecAivazis/survey/v2"
 )
 
-// TableSelector handles interactive table selection
 type TableSelector struct {
 	tables []string
 }
 
-// NewTableSelector creates a new table selector with the given tables
 func NewTableSelector(tables []string) *TableSelector {
-	// Sort tables for consistent display
 	sortedTables := make([]string, len(tables))
 	copy(sortedTables, tables)
 	sort.Strings(sortedTables)
@@ -25,7 +22,6 @@ func NewTableSelector(tables []string) *TableSelector {
 	}
 }
 
-// SelectTables presents an interactive checkbox selection interface and returns selected tables
 func (ts *TableSelector) SelectTables() ([]string, error) {
 	if len(ts.tables) == 0 {
 		return nil, fmt.Errorf("no tables available for selection")
@@ -33,7 +29,6 @@ func (ts *TableSelector) SelectTables() ([]string, error) {
 
 	Logger.Info("Found tables for selection", "count", len(ts.tables))
 	
-	// Show initial message
 	fmt.Printf("\n📋 Found %d table(s) matching your component criteria.\n", len(ts.tables))
 	fmt.Println("Use ↑/↓ to navigate, SPACE to select/deselect, ENTER to confirm")
 
@@ -43,13 +38,12 @@ func (ts *TableSelector) SelectTables() ([]string, error) {
 		Message: "Select tables to clone:",
 		Options: ts.tables,
 		Description: func(value string, index int) string {
-			// Add helpful descriptions for long table names
 			if len(value) > 50 {
 				return fmt.Sprintf("Table %d", index+1)
 			}
 			return ""
 		},
-		PageSize: 15, // Show up to 15 items at once
+		PageSize: 15,
 	}
 
 	err := survey.AskOne(prompt, &selectedTables, survey.WithPageSize(15))
@@ -64,13 +58,11 @@ func (ts *TableSelector) SelectTables() ([]string, error) {
 		return nil, fmt.Errorf("no tables selected")
 	}
 
-	// Show confirmation
 	fmt.Printf("\n✅ Selected %d table(s):\n", len(selectedTables))
 	for i, table := range selectedTables {
 		fmt.Printf("  %d. %s\n", i+1, table)
 	}
 	
-	// Final confirmation
 	var confirm bool
 	confirmPrompt := &survey.Confirm{
 		Message: fmt.Sprintf("Proceed with cloning %d selected table(s)?", len(selectedTables)),
@@ -89,7 +81,6 @@ func (ts *TableSelector) SelectTables() ([]string, error) {
 	return selectedTables, nil
 }
 
-// SelectTablesSimple provides a fallback numbered selection interface
 func (ts *TableSelector) SelectTablesSimple() ([]string, error) {
 	if len(ts.tables) == 0 {
 		return nil, fmt.Errorf("no tables available for selection")
@@ -121,7 +112,7 @@ func (ts *TableSelector) SelectTablesSimple() ([]string, error) {
 		
 		var num int
 		if _, err := fmt.Sscanf(part, "%d", &num); err != nil {
-			continue // Skip invalid numbers
+			continue
 		}
 		if num >= 1 && num <= len(ts.tables) && !selectedIndices[num-1] {
 			selectedTables = append(selectedTables, ts.tables[num-1])
@@ -133,7 +124,6 @@ func (ts *TableSelector) SelectTablesSimple() ([]string, error) {
 		return nil, fmt.Errorf("no tables selected")
 	}
 
-	// Show confirmation
 	fmt.Printf("\n✅ Selected %d table(s):\n", len(selectedTables))
 	for _, table := range selectedTables {
 		fmt.Printf("  - %s\n", table)
