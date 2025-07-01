@@ -88,7 +88,6 @@ func TestConfigMethods(t *testing.T) {
 		DynamoDB: make(map[string]dynamodb.Config),
 	}
 
-	// Test SetMySQLConfig and GetMySQLConfig
 	mysqlConfig := mysql.Config{
 		Host:     "localhost",
 		Port:     3306,
@@ -108,7 +107,6 @@ func TestConfigMethods(t *testing.T) {
 		t.Error("Retrieved MySQL config doesn't match set config")
 	}
 
-	// Test DynamoDB config
 	dynamoConfig := dynamodb.Config{
 		Region: "us-east-1",
 	}
@@ -124,7 +122,6 @@ func TestConfigMethods(t *testing.T) {
 		t.Error("Retrieved DynamoDB config doesn't match set config")
 	}
 
-	// Test non-existent config
 	_, err = config.GetMySQLConfig("nonexistent", "config")
 	if err == nil {
 		t.Error("Expected error for non-existent MySQL config")
@@ -151,19 +148,16 @@ func TestGetConfiguredConnections(t *testing.T) {
 
 	mysqlConns, dynamoConns := config.GetConfiguredConnections()
 
-	// Check MySQL connections
 	expectedMySQL := 3
 	if len(mysqlConns) != expectedMySQL {
 		t.Errorf("Expected %d MySQL connections, got %d", expectedMySQL, len(mysqlConns))
 	}
 
-	// Check DynamoDB connections
 	expectedDynamo := 2
 	if len(dynamoConns) != expectedDynamo {
 		t.Errorf("Expected %d DynamoDB connections, got %d", expectedDynamo, len(dynamoConns))
 	}
 
-	// Verify specific connections exist
 	mysqlMap := make(map[string]bool)
 	for _, conn := range mysqlConns {
 		mysqlMap[conn] = true
@@ -195,19 +189,16 @@ func TestConfigSerialization(t *testing.T) {
 		},
 	}
 
-	// Test JSON marshaling
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		t.Errorf("Failed to marshal config: %v", err)
 	}
 
-	// Write to temp file
 	err = os.WriteFile(tempFile, data, 0644)
 	if err != nil {
 		t.Errorf("Failed to write config file: %v", err)
 	}
 
-	// Read back and unmarshal
 	readData, err := os.ReadFile(tempFile)
 	if err != nil {
 		t.Errorf("Failed to read config file: %v", err)
@@ -219,7 +210,6 @@ func TestConfigSerialization(t *testing.T) {
 		t.Errorf("Failed to unmarshal config: %v", err)
 	}
 
-	// Verify data integrity
 	mysqlConfig, err := loadedConfig.GetMySQLConfig("test", "local")
 	if err != nil {
 		t.Errorf("Failed to get MySQL config: %v", err)

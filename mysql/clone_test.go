@@ -10,7 +10,6 @@ import (
 )
 
 func TestDatabaseRecreation(t *testing.T) {
-	// Test that CloneSchema always recreates database first
 	internal.VerboseMode = true
 	defer func() { internal.VerboseMode = false }()
 	
@@ -19,13 +18,11 @@ func TestDatabaseRecreation(t *testing.T) {
 		Dest:   Config{Database: "destdb"},
 	}
 
-	// This will fail due to no real DB, but ensures recreateDatabase is called
 	err := cloner.CloneSchema()
 	if err == nil {
 		t.Error("Expected error when cloning without real database")
 	}
 	
-	// The error should be from database recreation, not schema import
 	if !strings.Contains(err.Error(), "failed to recreate database") {
 		t.Logf("Error as expected: %v", err)
 	}
@@ -68,10 +65,8 @@ func TestConnectSource(t *testing.T) {
 		},
 	}
 
-	// This will fail since we don't have a real DB, but we can test the method exists
 	_, err := cloner.connectSource()
 	if err != nil {
-		// Expected to fail in test environment
 		if !strings.Contains(err.Error(), "connect: connection refused") && 
 		   !strings.Contains(err.Error(), "no such host") {
 			t.Logf("Connection failed as expected: %v", err)
@@ -85,14 +80,13 @@ func TestConnectDest(t *testing.T) {
 			Host:     "localhost",
 			Port:     3306,
 			User:     "root",
-			Password: "",  // Test passwordless connection
+			Password: "",
 			Database: "testdb",
 		},
 	}
 
 	_, err := cloner.connectDest()
 	if err != nil {
-		// Expected to fail in test environment
 		if !strings.Contains(err.Error(), "connect: connection refused") && 
 		   !strings.Contains(err.Error(), "no such host") {
 			t.Logf("Connection failed as expected: %v", err)
@@ -106,7 +100,6 @@ func TestSortTablesByDependency(t *testing.T) {
 	
 	sorted := cloner.sortTablesByDependency(tables)
 	
-	// Currently returns original order - test this behavior
 	if len(sorted) != len(tables) {
 		t.Errorf("Expected %d tables, got %d", len(tables), len(sorted))
 	}
@@ -119,12 +112,9 @@ func TestSortTablesByDependency(t *testing.T) {
 }
 
 func TestCloneSchemaWithMockError(t *testing.T) {
-	// Test the error detection logic without actual MySQL
-	// Set verbose mode to avoid spinner interference in tests
 	internal.VerboseMode = true
 	defer func() { internal.VerboseMode = false }()
 
-	// Create a temporary file to simulate schema export
 	tempFile := "test_schema.sql"
 	file, err := os.Create(tempFile)
 	if err != nil {
@@ -134,8 +124,6 @@ func TestCloneSchemaWithMockError(t *testing.T) {
 	file.Close()
 	defer os.Remove(tempFile)
 
-	// Test that the function uses the optimized fast schema clone approach
-	// We can't easily test the full flow without a real database, but we can test components
 }
 
 func TestImportSQLError(t *testing.T) {
@@ -149,7 +137,6 @@ func TestImportSQLError(t *testing.T) {
 		},
 	}
 
-	// Create a temp SQL file
 	tempFile := "test_import.sql"
 	file, err := os.Create(tempFile)
 	if err != nil {
@@ -159,13 +146,11 @@ func TestImportSQLError(t *testing.T) {
 	file.Close()
 	defer os.Remove(tempFile)
 
-	// This should fail because host doesn't exist
 	err = cloner.importSQL(tempFile)
 	if err == nil {
 		t.Error("Expected error when importing to nonexistent host")
 	}
 
-	// Should be a connection error
 	if !strings.Contains(err.Error(), "failed to import SQL") {
 		t.Logf("Got expected error: %v", err)
 	}
@@ -203,8 +188,6 @@ func TestPasswordlessDSN(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// We can't easily extract the DSN from sql.Open without connecting,
-			// but we can test the recreation DSN logic
 			var dsn string
 			if tt.config.Password != "" {
 				dsn = fmt.Sprintf("%s:%s@tcp(%s:%d)/", 
@@ -231,8 +214,6 @@ func TestCloneSchemaFlow(t *testing.T) {
 		Dest:   Config{Database: "destdb"},
 	}
 
-	// Test CloneSchema always recreates database first
-	// This will fail due to no real DB, but we can verify the method exists
 	err := cloner.CloneSchema()
 	if err == nil {
 		t.Error("Expected error when cloning without real database")
@@ -240,16 +221,12 @@ func TestCloneSchemaFlow(t *testing.T) {
 }
 
 func TestInsertBatch(t *testing.T) {
-	// This test requires a real database connection to properly test
-	// For now, we'll test that the method signature is correct
 	
-	// Create some test data
 	batch := [][]interface{}{
 		{1, "test1"},
 		{2, "test2"},
 	}
 	
-	// Test that batch has expected structure
 	if len(batch) != 2 {
 		t.Errorf("Expected 2 items in batch, got %d", len(batch))
 	}
@@ -259,9 +236,7 @@ func TestInsertBatch(t *testing.T) {
 	}
 }
 
-// Test that recreateDatabase handles passwordless connections
 func TestRecreateDatabase(t *testing.T) {
-	// Set verbose mode to avoid spinner issues in tests
 	internal.VerboseMode = true
 	defer func() { internal.VerboseMode = false }()
 	
@@ -270,24 +245,21 @@ func TestRecreateDatabase(t *testing.T) {
 			Host:     "nonexistent.host",
 			Port:     3306,
 			User:     "root",
-			Password: "", // Test passwordless
+			Password: "",
 			Database: "testdb",
 		},
 	}
 
-	// This will fail without real database, but tests the DSN construction
 	err := cloner.recreateDatabase()
 	if err == nil {
 		t.Error("Expected error when recreating database without real connection")
 	}
 	
-	// Should be a connection error
 	if strings.Contains(err.Error(), "failed to recreate database") {
 		t.Logf("Got expected error: %v", err)
 	}
 }
 
-// Test data cloning performance optimizations
 func TestGetTableSizes(t *testing.T) {
 	cloner := &Cloner{
 		Source: Config{
@@ -300,14 +272,11 @@ func TestGetTableSizes(t *testing.T) {
 
 	tables := []string{"users", "orders", "products"}
 	
-	// This will fail without real DB, but tests the structure
 	sizes, err := cloner.getTableSizes(tables)
 	if err != nil {
-		// Expected to fail in test environment
 		t.Logf("Expected connection error: %v", err)
 	}
 	
-	// Should return empty map on connection failure
 	if sizes == nil {
 		t.Error("Expected non-nil map even on connection failure")
 	}
@@ -318,9 +287,9 @@ func TestCategorizeTablesBySize(t *testing.T) {
 	
 	tables := []string{"large_table", "medium_table", "small_table"}
 	tableSizes := map[string]int64{
-		"large_table":  500000, // >100K rows
-		"medium_table": 50000,  // >10K rows  
-		"small_table":  1000,   // <10K rows
+		"large_table":  500000,
+		"medium_table": 50000,
+		"small_table":  1000,
 	}
 	
 	large, medium, small := cloner.categorizeTablesBySize(tables, tableSizes)
@@ -347,36 +316,31 @@ func TestCloneDataWithEmptyTables(t *testing.T) {
 		Dest:   Config{Database: "destdb"},
 	}
 
-	// Test with empty table list - should try to get all tables
 	err := cloner.CloneData([]string{})
 	if err == nil {
 		t.Error("Expected error when cloning without real database")
 	}
 	
-	// Should fail trying to get all tables
 	if !strings.Contains(err.Error(), "failed to get table list") {
 		t.Logf("Got expected error: %v", err)
 	}
 }
 
 func TestCloneDataPerformanceStructure(t *testing.T) {
-	// Test the structure of the performance optimization without real DB
 	cloner := &Cloner{
 		Source: Config{Database: "sourcedb"},
 		Dest:   Config{Database: "destdb"},
 	}
 
-	// Test categorization with known table sizes
 	tables := []string{"table1", "table2", "table3"}
 	tableSizes := map[string]int64{
-		"table1": 200000, // Large
-		"table2": 50000,  // Medium  
-		"table3": 5000,   // Small
+		"table1": 200000,
+		"table2": 50000,
+		"table3": 5000,
 	}
 	
 	large, medium, small := cloner.categorizeTablesBySize(tables, tableSizes)
 	
-	// Verify categorization logic
 	expectedLarge := 1
 	expectedMedium := 1
 	expectedSmall := 1
@@ -393,9 +357,6 @@ func TestCloneDataPerformanceStructure(t *testing.T) {
 }
 
 func TestOptimizedMySQLDumpArgs(t *testing.T) {
-	// Test that optimized mysqldump includes performance flags
-	// The cloneTableOptimized method should include RDS-compatible flags
-	// We can't easily test the full method without a real DB, but we can verify the concept
 	expectedFlags := []string{
 		"--no-create-info",
 		"--skip-disable-keys", 
@@ -408,9 +369,7 @@ func TestOptimizedMySQLDumpArgs(t *testing.T) {
 		"--extended-insert",
 	}
 	
-	// This test verifies the flags exist in our implementation
 	for _, flag := range expectedFlags {
-		// Each flag should be considered for MySQL dump optimization
 		if flag == "" {
 			t.Error("Empty flag found in expected optimization flags")
 		}
@@ -418,11 +377,9 @@ func TestOptimizedMySQLDumpArgs(t *testing.T) {
 }
 
 func TestProgressTracking(t *testing.T) {
-	// Test progress tracking logic
 	var processedRows int64 = 0
 	var totalRows int64 = 100000
 	
-	// Simulate processing some rows
 	processedRows += 25000
 	progress := float64(processedRows) / float64(totalRows) * 100
 	
@@ -431,18 +388,15 @@ func TestProgressTracking(t *testing.T) {
 		t.Errorf("Expected progress %.1f%%, got %.1f%%", expectedProgress, progress)
 	}
 	
-	// Test that progress doesn't exceed 100%
-	processedRows += 100000 // More than total
+	processedRows += 100000
 	progress = float64(processedRows) / float64(totalRows) * 100
 	
 	if progress <= 100.0 {
-		// This is actually okay - progress can exceed 100% if estimates are wrong
 		t.Logf("Progress is %.1f%% (estimates can be inaccurate)", progress)
 	}
 }
 
 func TestMinFunction(t *testing.T) {
-	// Test the min helper function
 	tests := []struct {
 		a, b     int64
 		expected int64
@@ -463,7 +417,6 @@ func TestMinFunction(t *testing.T) {
 }
 
 func TestDataCloningSpinners(t *testing.T) {
-	// Test that data cloning operations show loading indicators
 	internal.VerboseMode = true
 	defer func() { internal.VerboseMode = false }()
 	
@@ -472,21 +425,18 @@ func TestDataCloningSpinners(t *testing.T) {
 		Dest:   Config{Database: "destdb"},
 	}
 
-	// Test CloneData with empty table list (triggers table discovery spinner)
 	err := cloner.CloneData([]string{})
 	if err == nil {
 		t.Error("Expected error when cloning without real database")
 	}
 	
-	// Should fail at table discovery step but show the spinner was called
 	if !strings.Contains(err.Error(), "failed to get table list") {
 		t.Logf("Got expected error: %v", err)
 	}
 }
 
 func TestTableSizeAnalysisWithSpinner(t *testing.T) {
-	// Test that table size analysis shows spinner
-	internal.VerboseMode = false // Enable spinners
+	internal.VerboseMode = false
 	defer func() { internal.VerboseMode = false }()
 	
 	cloner := &Cloner{
@@ -498,16 +448,13 @@ func TestTableSizeAnalysisWithSpinner(t *testing.T) {
 
 	tables := []string{"test_table"}
 	
-	// This will fail but should show spinner behavior
 	_, err := cloner.getTableSizes(tables)
 	if err != nil {
-		// Expected to fail in test environment
 		t.Logf("Expected connection error: %v", err)
 	}
 }
 
 func TestStreamingWithProgressIndicators(t *testing.T) {
-	// Test that streaming operations would show progress
 	internal.VerboseMode = true
 	defer func() { internal.VerboseMode = false }()
 	
@@ -519,13 +466,11 @@ func TestStreamingWithProgressIndicators(t *testing.T) {
 	var processedRows int64 = 0
 	var totalRows int64 = 50000
 	
-	// Test the streaming function structure (will fail due to no real DB)
 	err := cloner.cloneTableWithStreaming("test_table", 50000, &processedRows, totalRows)
 	if err == nil {
 		t.Error("Expected error when streaming without real database")
 	}
 	
-	// Should fail at CloneWithFilter step but structure is tested
 	if strings.Contains(err.Error(), "failed to clone chunk") {
 		t.Logf("Got expected chunking error: %v", err)
 	}

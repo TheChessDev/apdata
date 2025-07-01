@@ -36,7 +36,6 @@ func (c *Cloner) CloneSchema() error {
 	totalStart := time.Now()
 	internal.Logger.Info("Starting schema clone", "source", c.Source.Database, "dest", c.Dest.Database)
 
-	// Always recreate database first to ensure clean import
 	recreateStart := time.Now()
 	if err := c.recreateDatabase(); err != nil {
 		return fmt.Errorf("failed to recreate database: %w", err)
@@ -44,25 +43,24 @@ func (c *Cloner) CloneSchema() error {
 	recreateDuration := time.Since(recreateStart)
 	internal.Logger.Info("Database recreation completed", "duration", recreateDuration)
 
-	// Prepare optimized mysqldump command
 	exportStart := time.Now()
 	args := []string{
-		"--no-data",                 // Schema only
-		"--skip-add-drop-table",     // Don't add DROP TABLE statements  
-		"--skip-disable-keys",       // Don't disable keys
-		"--routines",                // Include stored procedures/functions
-		"--triggers",                // Include triggers
-		"--events",                  // Include events
-		"--single-transaction",      // Performance: Consistent snapshot
-		"--quick",                   // Performance: Retrieve rows one at a time
-		"--lock-tables=false",       // Performance: Don't lock tables
-		"--skip-lock-tables",        // Avoid FLUSH TABLES WITH READ LOCK
-		"--no-tablespaces",          // Avoid tablespace operations
-		"--skip-comments",           // Performance: Skip comment generation
-		"--compact",                 // Performance: Less verbose output
-		"--default-character-set=utf8mb4", // Explicit charset
-		"--set-gtid-purged=OFF",     // RDS compatibility: avoid GTID issues
-		"--column-statistics=0",     // RDS compatibility: disable column statistics
+		"--no-data",
+		"--skip-add-drop-table",
+		"--skip-disable-keys",
+		"--routines",
+		"--triggers",
+		"--events",
+		"--single-transaction",
+		"--quick",
+		"--lock-tables=false",
+		"--skip-lock-tables",
+		"--no-tablespaces",
+		"--skip-comments",
+		"--compact",
+		"--default-character-set=utf8mb4",
+		"--set-gtid-purged=OFF",
+		"--column-statistics=0",
 		fmt.Sprintf("--host=%s", c.Source.Host),
 		fmt.Sprintf("--port=%d", c.Source.Port),
 		fmt.Sprintf("--user=%s", c.Source.User),
@@ -87,7 +85,6 @@ func (c *Cloner) CloneSchema() error {
 		}
 		defer file.Close()
 
-		// Capture stderr for better error reporting
 		var stderr strings.Builder
 		cmd.Stdout = file
 		cmd.Stderr = &stderr
@@ -96,7 +93,6 @@ func (c *Cloner) CloneSchema() error {
 			stderrOutput := stderr.String()
 			internal.Logger.Debug("Export error details", "stderr", stderrOutput, "error", err)
 			
-			// Store the error for later evaluation
 			exportError = fmt.Errorf("mysqldump failed: %w (stderr: %s)", err, stderrOutput)
 			return exportError
 		}
@@ -107,19 +103,16 @@ func (c *Cloner) CloneSchema() error {
 	exportDuration := time.Since(exportStart)
 	internal.Logger.Debug("Schema export completed", "duration", exportDuration, "file", schemaFile)
 
-	// Check if export failed but we still got a usable schema file (common with RDS privilege issues)
 	if err != nil {
 		if fileInfo, statErr := os.Stat(schemaFile); statErr == nil && fileInfo.Size() > 0 {
 			if exportError != nil && strings.Contains(exportError.Error(), "FLUSH") && strings.Contains(exportError.Error(), "Access denied") {
 				internal.Logger.Warn("MySQL privilege warning (common with RDS)", "warning", "FLUSH TABLES permission not available, but schema export succeeded")
 				internal.Logger.Info("Schema file was created despite privilege warning", "size_bytes", fileInfo.Size())
 				
-				// Let's check the content of the schema file to see if it has actual schema
 				if content, readErr := os.ReadFile(schemaFile); readErr == nil {
 					contentStr := string(content)
 					if strings.Contains(contentStr, "CREATE TABLE") || strings.Contains(contentStr, "CREATE PROCEDURE") || strings.Contains(contentStr, "CREATE FUNCTION") {
 						internal.Logger.Info("Schema file contains valid database objects, continuing with import")
-						// Continue with import despite the privilege warning
 					} else {
 						previewLen := 200
 						if len(contentStr) < previewLen {
@@ -127,7 +120,6 @@ func (c *Cloner) CloneSchema() error {
 						}
 						internal.Logger.Error("Schema file does not contain valid database objects", "content_preview", contentStr[:previewLen])
 						
-						// Try a fallback approach with minimal flags for RDS
 						internal.Logger.Info("Attempting fallback export with minimal flags for RDS compatibility")
 						return c.tryFallbackSchemaExport(schemaFile)
 					}
@@ -140,7 +132,6 @@ func (c *Cloner) CloneSchema() error {
 		}
 	}
 
-	// Get file size for performance metrics
 	if fileInfo, err := os.Stat(schemaFile); err == nil {
 		internal.Logger.Info("Schema file created", "size_bytes", fileInfo.Size(), "size_mb", float64(fileInfo.Size())/1024/1024)
 	}
@@ -154,7 +145,6 @@ func (c *Cloner) CloneSchema() error {
 	importDuration := time.Since(importStart)
 	internal.Logger.Debug("Schema import completed", "duration", importDuration)
 
-	// Clean up schema file
 	os.Remove(schemaFile)
 
 	totalDuration := time.Since(totalStart)
@@ -163,7 +153,6 @@ func (c *Cloner) CloneSchema() error {
 		"export_pct", fmt.Sprintf("%.1f%%", float64(exportDuration.Nanoseconds())/float64(totalDuration.Nanoseconds())*100),
 		"import_pct", fmt.Sprintf("%.1f%%", float64(importDuration.Nanoseconds())/float64(totalDuration.Nanoseconds())*100))
 
-	// Finish the schema cloning operation line
 	internal.FinishLine()
 
 	return err
@@ -172,16 +161,15 @@ func (c *Cloner) CloneSchema() error {
 func (c *Cloner) tryFallbackSchemaExport(schemaFile string) error {
 	internal.Logger.Info("Trying fallback schema export with basic flags")
 	
-	// Use minimal flags that should work with most RDS configurations
 	args := []string{
-		"--no-data",                 // Schema only
-		"--routines=false",          // Skip routines to avoid permission issues
-		"--triggers=false",          // Skip triggers to avoid permission issues
-		"--events=false",            // Skip events to avoid permission issues
-		"--single-transaction",      // Basic consistency
-		"--lock-tables=false",       // Don't lock tables
-		"--set-gtid-purged=OFF",     // RDS compatibility
-		"--column-statistics=0",     // RDS compatibility
+		"--no-data",
+		"--routines=false",
+		"--triggers=false",
+		"--events=false",
+		"--single-transaction",
+		"--lock-tables=false",
+		"--set-gtid-purged=OFF",
+		"--column-statistics=0",
 		fmt.Sprintf("--host=%s", c.Source.Host),
 		fmt.Sprintf("--port=%d", c.Source.Port),
 		fmt.Sprintf("--user=%s", c.Source.User),
@@ -212,7 +200,6 @@ func (c *Cloner) tryFallbackSchemaExport(schemaFile string) error {
 		return fmt.Errorf("fallback mysqldump also failed: %w (stderr: %s)", err, stderrOutput)
 	}
 
-	// Check if fallback created useful content
 	if content, readErr := os.ReadFile(schemaFile); readErr == nil {
 		contentStr := string(content)
 		if strings.Contains(contentStr, "CREATE TABLE") {
@@ -251,7 +238,6 @@ func (c *Cloner) CloneData(tables []string) error {
 		internal.Logger.Debug("Found tables to clone", "count", len(tables), "tables", tables)
 	}
 
-	// Get table sizes for intelligent processing
 	var tableSizes map[string]int64
 	err := internal.SimpleSpinner("Analyzing table sizes", func() error {
 		var err error
@@ -263,7 +249,6 @@ func (c *Cloner) CloneData(tables []string) error {
 		tableSizes = make(map[string]int64)
 	}
 
-	// Categorize tables by size for optimal processing strategy
 	largeTables, mediumTables, smallTables := c.categorizeTablesBySize(tables, tableSizes)
 	
 	internal.Logger.Debug("Table size analysis", 
@@ -275,13 +260,11 @@ func (c *Cloner) CloneData(tables []string) error {
 	var totalRows int64
 	var processedRows int64
 
-	// Estimate total work for progress tracking
 	for _, size := range tableSizes {
 		totalRows += size
 	}
 	internal.Logger.Debug("Estimated total rows to clone", "rows", totalRows)
 
-	// Process large tables individually with streaming
 	for i, table := range largeTables {
 		err := internal.SimpleSpinner(fmt.Sprintf("Cloning large table %s (%d/%d)", table, i+1, len(largeTables)), func() error {
 			return c.cloneTableWithStreaming(table, tableSizes[table], &processedRows, totalRows)
@@ -291,7 +274,6 @@ func (c *Cloner) CloneData(tables []string) error {
 		}
 	}
 
-	// Process medium tables with optimized mysqldump
 	for i, table := range mediumTables {
 		err := internal.SimpleSpinner(fmt.Sprintf("Cloning medium table %s (%d/%d)", table, i+1, len(mediumTables)), func() error {
 			return c.cloneTableOptimized(table, tableSizes[table], &processedRows, totalRows)
@@ -301,7 +283,6 @@ func (c *Cloner) CloneData(tables []string) error {
 		}
 	}
 
-	// Process small tables in parallel batches
 	if len(smallTables) > 0 {
 		smallTablesErr := internal.SimpleSpinner(fmt.Sprintf("Cloning %d small tables in parallel", len(smallTables)), func() error {
 			return c.cloneSmallTablesParallel(smallTables, tableSizes, &processedRows, totalRows)
@@ -318,7 +299,6 @@ func (c *Cloner) CloneData(tables []string) error {
 		"avg_rows_per_sec", float64(processedRows)/totalDuration.Seconds(),
 		"tables_processed", len(tables))
 
-	// Finish the data cloning operation line
 	internal.FinishLine()
 
 	return nil
@@ -439,27 +419,21 @@ func (c *Cloner) connectDest() (*sql.DB, error) {
 	return sql.Open("mysql", dsn)
 }
 
-// EnsureTableExists ensures the destination table exists with the same schema as the source table.
-// It will drop the existing destination table if it exists and recreate it with the source schema.
-// This method handles foreign key constraints by temporarily disabling foreign key checks.
 func (c *Cloner) EnsureTableExists(table string) error {
 	internal.Logger.Debug("Ensuring table exists", "table", table)
 
-	// Connect to source database
 	sourceDB, err := c.connectSource()
 	if err != nil {
 		return fmt.Errorf("failed to connect to source database: %w", err)
 	}
 	defer sourceDB.Close()
 
-	// Connect to destination database
 	destDB, err := c.connectDest()
 	if err != nil {
 		return fmt.Errorf("failed to connect to destination database: %w", err)
 	}
 	defer destDB.Close()
 
-	// Get CREATE TABLE statement from source
 	var createTableSQL string
 	query := fmt.Sprintf("SHOW CREATE TABLE `%s`", table)
 	row := sourceDB.QueryRow(query)
@@ -471,13 +445,11 @@ func (c *Cloner) EnsureTableExists(table string) error {
 
 	internal.Logger.Debug("Retrieved CREATE TABLE statement", "table", table)
 
-	// Disable foreign key checks to handle tables with foreign key constraints
 	if _, err := destDB.Exec("SET FOREIGN_KEY_CHECKS = 0"); err != nil {
 		return fmt.Errorf("failed to disable foreign key checks: %w", err)
 	}
 	internal.Logger.Debug("Disabled foreign key checks", "table", table)
 
-	// Ensure foreign key checks are re-enabled even if an error occurs
 	defer func() {
 		if _, err := destDB.Exec("SET FOREIGN_KEY_CHECKS = 1"); err != nil {
 			internal.Logger.Error("Failed to re-enable foreign key checks", "table", table, "error", err)
@@ -486,7 +458,6 @@ func (c *Cloner) EnsureTableExists(table string) error {
 		}
 	}()
 
-	// Drop the table if it exists in destination
 	dropQuery := fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table)
 	if _, err := destDB.Exec(dropQuery); err != nil {
 		return fmt.Errorf("failed to drop existing table %s in destination: %w", table, err)
@@ -494,7 +465,6 @@ func (c *Cloner) EnsureTableExists(table string) error {
 
 	internal.Logger.Debug("Dropped existing table if present", "table", table)
 
-	// Create the table in destination with the same schema
 	if _, err := destDB.Exec(createTableSQL); err != nil {
 		return fmt.Errorf("failed to create table %s in destination: %w", table, err)
 	}
@@ -504,13 +474,12 @@ func (c *Cloner) EnsureTableExists(table string) error {
 }
 
 func (c *Cloner) importSQL(filename string) error {
-	// Performance optimized mysql import
 	args := []string{
 		fmt.Sprintf("--host=%s", c.Dest.Host),
 		fmt.Sprintf("--port=%d", c.Dest.Port),
 		fmt.Sprintf("--user=%s", c.Dest.User),
-		"--force",                    // Performance: Continue on errors
-		"--default-character-set=utf8mb4", // Performance: Set charset explicitly
+		"--force",
+		"--default-character-set=utf8mb4",
 	}
 
 	if c.Dest.Password != "" {
@@ -528,7 +497,6 @@ func (c *Cloner) importSQL(filename string) error {
 	}
 	defer file.Close()
 
-	// Capture stderr for better error reporting
 	var stderr strings.Builder
 	cmd.Stdin = file
 	cmd.Stderr = &stderr
@@ -595,7 +563,6 @@ func (c *Cloner) recreateDatabase() error {
 	})
 }
 
-// getTablesWithPrefix returns tables that start with the given prefix
 func (c *Cloner) getTablesWithPrefix(prefix string) ([]string, error) {
 	db, err := c.connectSource()
 	if err != nil {
@@ -615,7 +582,6 @@ func (c *Cloner) getTablesWithPrefix(prefix string) ([]string, error) {
 		if err := rows.Scan(&table); err != nil {
 			return nil, err
 		}
-		// Filter tables that match our prefix
 		if strings.HasPrefix(table, prefix+"_") {
 			tables = append(tables, table)
 			internal.Logger.Debug("Found matching table", "table", table, "prefix", prefix)
@@ -626,7 +592,6 @@ func (c *Cloner) getTablesWithPrefix(prefix string) ([]string, error) {
 	return tables, rows.Err()
 }
 
-// CloneTablesWithPrefix clones all tables that match the source prefix to destination with new prefix
 func (c *Cloner) CloneTablesWithPrefix(sourcePrefix, destPrefix string, schemaOnly, dataOnly bool) error {
 	if sourcePrefix == "" || destPrefix == "" {
 		return fmt.Errorf("both sourcePrefix and destPrefix must be specified for prefix-based cloning")
@@ -637,7 +602,6 @@ func (c *Cloner) CloneTablesWithPrefix(sourcePrefix, destPrefix string, schemaOn
 		"source_prefix", sourcePrefix, 
 		"dest_prefix", destPrefix)
 	
-	// Discover source tables
 	var sourceTables []string
 	err := internal.SimpleSpinner(fmt.Sprintf("Discovering tables with prefix %s", sourcePrefix), func() error {
 		var discoverErr error
@@ -657,12 +621,9 @@ func (c *Cloner) CloneTablesWithPrefix(sourcePrefix, destPrefix string, schemaOn
 	
 	var totalErrors int64
 	
-	// Clone each table
 	for i, sourceTable := range sourceTables {
-		// Generate destination table name by replacing prefix
 		destTable := strings.Replace(sourceTable, sourcePrefix+"_", destPrefix+"_", 1)
 		
-		// Create temporary cloner for this specific table pair
 		tableCloner := &Cloner{
 			Source: Config{
 				Host:     c.Source.Host,
@@ -680,16 +641,13 @@ func (c *Cloner) CloneTablesWithPrefix(sourcePrefix, destPrefix string, schemaOn
 			},
 		}
 		
-		// Clone table with progress indicator
 		err := internal.SimpleSpinner(fmt.Sprintf("Cloning table %s → %s (%d/%d)", sourceTable, destTable, i+1, len(sourceTables)), func() error {
-			// Clone schema first if requested
 			if !dataOnly {
 				if err := tableCloner.cloneTableSchema(sourceTable, destTable); err != nil {
 					return fmt.Errorf("failed to clone schema: %w", err)
 				}
 			}
 			
-			// Clone data if requested
 			if !schemaOnly {
 				if err := tableCloner.cloneTableData(sourceTable, destTable); err != nil {
 					return fmt.Errorf("failed to clone data: %w", err)
@@ -725,13 +683,11 @@ func (c *Cloner) CloneTablesWithPrefix(sourcePrefix, destPrefix string, schemaOn
 		"source_prefix", sourcePrefix,
 		"dest_prefix", destPrefix)
 	
-	// Finish the prefix-based cloning operation line
 	internal.FinishLine()
 	
 	return nil
 }
 
-// cloneTableSchema creates a specific table in the destination with a new name
 func (c *Cloner) cloneTableSchema(sourceTable, destTable string) error {
 	sourceDB, err := c.connectSource()
 	if err != nil {
@@ -745,7 +701,6 @@ func (c *Cloner) cloneTableSchema(sourceTable, destTable string) error {
 	}
 	defer destDB.Close()
 
-	// Get CREATE TABLE statement for source table
 	var createTableSQL string
 	query := fmt.Sprintf("SHOW CREATE TABLE `%s`", sourceTable)
 	row := sourceDB.QueryRow(query)
@@ -755,18 +710,15 @@ func (c *Cloner) cloneTableSchema(sourceTable, destTable string) error {
 		return fmt.Errorf("failed to get CREATE TABLE statement: %w", err)
 	}
 
-	// Replace source table name with destination table name in the CREATE statement
 	modifiedSQL := strings.Replace(createTableSQL, fmt.Sprintf("CREATE TABLE `%s`", sourceTable), fmt.Sprintf("CREATE TABLE `%s`", destTable), 1)
 	
 	internal.Logger.Debug("Creating table schema", "dest_table", destTable)
 	
-	// Drop destination table if it exists
 	_, err = destDB.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", destTable))
 	if err != nil {
 		return fmt.Errorf("failed to drop existing table: %w", err)
 	}
 	
-	// Create the table with modified name
 	_, err = destDB.Exec(modifiedSQL)
 	if err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
@@ -776,7 +728,6 @@ func (c *Cloner) cloneTableSchema(sourceTable, destTable string) error {
 	return nil
 }
 
-// cloneTableData copies data from source table to destination table with potentially different names
 func (c *Cloner) cloneTableData(sourceTable, destTable string) error {
 	sourceDB, err := c.connectSource()
 	if err != nil {
@@ -790,13 +741,11 @@ func (c *Cloner) cloneTableData(sourceTable, destTable string) error {
 	}
 	defer destDB.Close()
 
-	// Get table columns
 	columns, err := c.getTableColumns(sourceDB, sourceTable)
 	if err != nil {
 		return err
 	}
 
-	// Build SELECT query
 	selectQuery := fmt.Sprintf("SELECT %s FROM `%s`", strings.Join(columns, ", "), sourceTable)
 	
 	internal.Logger.Debug("Querying source table", "table", sourceTable)
@@ -807,13 +756,11 @@ func (c *Cloner) cloneTableData(sourceTable, destTable string) error {
 	}
 	defer rows.Close()
 
-	// Prepare INSERT statement for destination
 	placeholders := strings.Repeat("?,", len(columns))
 	placeholders = placeholders[:len(placeholders)-1]
 	insertQuery := fmt.Sprintf("INSERT INTO `%s` (%s) VALUES (%s)",
 		destTable, strings.Join(columns, ", "), placeholders)
 
-	// Disable foreign key checks
 	if _, err := destDB.Exec("SET FOREIGN_KEY_CHECKS=0"); err != nil {
 		return fmt.Errorf("failed to disable FK checks: %w", err)
 	}
@@ -851,7 +798,6 @@ func (c *Cloner) cloneTableData(sourceTable, destTable string) error {
 		}
 	}
 
-	// Insert final batch
 	if len(batch) > 0 {
 		if err := c.insertBatch(stmt, batch); err != nil {
 			return fmt.Errorf("failed to insert final batch: %w", err)
@@ -920,7 +866,6 @@ func (c *Cloner) insertBatch(stmt *sql.Stmt, batch [][]interface{}) error {
 	return nil
 }
 
-// getTableSizes retrieves row counts for all tables to enable intelligent processing
 func (c *Cloner) getTableSizes(tables []string) (map[string]int64, error) {
 	db, err := c.connectSource()
 	if err != nil {
@@ -945,11 +890,10 @@ func (c *Cloner) getTableSizes(tables []string) (map[string]int64, error) {
 	return tableSizes, nil
 }
 
-// categorizeTablesBySize splits tables into size categories for optimal processing
 func (c *Cloner) categorizeTablesBySize(tables []string, tableSizes map[string]int64) (large, medium, small []string) {
 	const (
-		largeThreshold  = 100000  // Tables with >100K rows
-		mediumThreshold = 10000   // Tables with >10K rows
+		largeThreshold  = 100000
+		mediumThreshold = 10000
 	)
 	
 	for _, table := range tables {
@@ -966,18 +910,15 @@ func (c *Cloner) categorizeTablesBySize(tables []string, tableSizes map[string]i
 	return large, medium, small
 }
 
-// cloneTableWithStreaming handles large tables with chunked streaming to avoid memory issues
 func (c *Cloner) cloneTableWithStreaming(table string, estimatedRows int64, processedRows *int64, totalRows int64) error {
 	internal.Logger.Info("Starting streaming clone for large table", "table", table)
 	
-	// Use chunked approach for large tables
 	const chunkSize = 10000
 	chunks := (estimatedRows / chunkSize) + 1
 	
 	for chunk := int64(0); chunk < chunks; chunk++ {
 		offset := chunk * chunkSize
 		
-		// Show progress
 		progress := float64(*processedRows) / float64(totalRows) * 100
 		internal.Logger.Debug("Processing chunk", "table", table, "chunk", chunk+1, "total_chunks", chunks, 
 			"offset", offset, "overall_progress", fmt.Sprintf("%.1f%%", progress))
@@ -998,7 +939,6 @@ func (c *Cloner) cloneTableWithStreaming(table string, estimatedRows int64, proc
 	return nil
 }
 
-// cloneTableOptimized uses optimized mysqldump for medium-sized tables
 func (c *Cloner) cloneTableOptimized(table string, estimatedRows int64, processedRows *int64, totalRows int64) error {
 	start := time.Now()
 	
@@ -1008,10 +948,10 @@ func (c *Cloner) cloneTableOptimized(table string, estimatedRows int64, processe
 		"--single-transaction",
 		"--quick",
 		"--lock-tables=false",
-		"--skip-lock-tables",        // RDS compatibility
-		"--set-gtid-purged=OFF",     // RDS compatibility
-		"--column-statistics=0",     // RDS compatibility
-		"--extended-insert",         // Performance: use multi-row inserts
+		"--skip-lock-tables",
+		"--set-gtid-purged=OFF",
+		"--column-statistics=0",
+		"--extended-insert",
 		"--default-character-set=utf8mb4",
 		fmt.Sprintf("--host=%s", c.Source.Host),
 		fmt.Sprintf("--port=%d", c.Source.Port),
@@ -1033,11 +973,9 @@ func (c *Cloner) cloneTableOptimized(table string, estimatedRows int64, processe
 		return fmt.Errorf("failed to create data file: %w", err)
 	}
 	defer file.Close()
-	defer os.Remove(dataFile) // Clean up after import
+	defer os.Remove(dataFile)
 
-	// Export with spinner
 	exportErr := internal.SimpleSpinner(fmt.Sprintf("Exporting %s data", table), func() error {
-		// Capture stderr for error reporting
 		var stderr strings.Builder
 		cmd.Stdout = file
 		cmd.Stderr = &stderr
@@ -1056,13 +994,11 @@ func (c *Cloner) cloneTableOptimized(table string, estimatedRows int64, processe
 
 	exportDuration := time.Since(start)
 	
-	// Get actual file size
 	if fileInfo, err := os.Stat(dataFile); err == nil {
 		internal.Logger.Debug("Table data exported", "table", table, "file", dataFile, 
 			"size_mb", float64(fileInfo.Size())/1024/1024, "export_duration", exportDuration)
 	}
 
-	// Import the data
 	importStart := time.Now()
 	importErr := internal.SimpleSpinner(fmt.Sprintf("Importing %s data", table), func() error {
 		return c.importTableData(dataFile)
@@ -1082,24 +1018,22 @@ func (c *Cloner) cloneTableOptimized(table string, estimatedRows int64, processe
 	return nil
 }
 
-// cloneSmallTablesParallel processes small tables in parallel for efficiency
 func (c *Cloner) cloneSmallTablesParallel(tables []string, tableSizes map[string]int64, processedRows *int64, totalRows int64) error {
-	const maxConcurrency = 3 // Conservative concurrency to avoid overwhelming the database
+	const maxConcurrency = 3
 	
 	sem := make(chan struct{}, maxConcurrency)
 	errChan := make(chan error, len(tables))
 	
 	for _, table := range tables {
 		go func(tableName string) {
-			sem <- struct{}{} // Acquire semaphore
-			defer func() { <-sem }() // Release semaphore
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			
 			err := c.cloneTableOptimized(tableName, tableSizes[tableName], processedRows, totalRows)
 			errChan <- err
 		}(table)
 	}
 	
-	// Wait for all goroutines to complete
 	var errors []error
 	for i := 0; i < len(tables); i++ {
 		if err := <-errChan; err != nil {

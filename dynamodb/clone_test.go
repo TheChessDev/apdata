@@ -23,7 +23,6 @@ func TestNewCloner(t *testing.T) {
 
 	cloner, err := NewCloner(sourceConfig, destConfig)
 	if err != nil {
-		// Expected to fail in test environment without AWS credentials
 		if cloner == nil {
 			t.Log("Expected failure - no AWS credentials in test environment")
 		}
@@ -43,10 +42,8 @@ func TestCreateClient(t *testing.T) {
 		Region: "us-east-1",
 	}
 
-	// This will likely fail without real AWS config, but tests the function exists
 	client, err := createClient(cfg)
 	if err != nil {
-		// Expected in test environment
 		t.Logf("Expected error creating client without AWS credentials: %v", err)
 		return
 	}
@@ -57,7 +54,6 @@ func TestCreateClient(t *testing.T) {
 }
 
 func TestCloneOptions(t *testing.T) {
-	// Test CloneOptions structure and defaults
 	options := CloneOptions{
 		Concurrency: 5,
 		BatchSize:   20,
@@ -72,12 +68,10 @@ func TestCloneOptions(t *testing.T) {
 }
 
 func TestCloneMetrics(t *testing.T) {
-	// Test CloneMetrics structure and atomic operations
 	metrics := &CloneMetrics{
 		StartTime: time.Now(),
 	}
 
-	// Test atomic operations
 	atomic.AddInt64(&metrics.ItemsProcessed, 100)
 	atomic.AddInt64(&metrics.BytesProcessed, 5000)
 	atomic.AddInt64(&metrics.ErrorCount, 2)
@@ -104,10 +98,9 @@ func TestCloneMetrics(t *testing.T) {
 		t.Errorf("Expected 10 batches written, got %d", metrics.BatchesWritten)
 	}
 
-	// Test average calculation
 	if metrics.BytesProcessed > 0 && metrics.ItemsProcessed > 0 {
 		avgSize := metrics.BytesProcessed / metrics.ItemsProcessed
-		expectedAvg := int64(50) // 5000 / 100
+		expectedAvg := int64(50)
 		if avgSize != expectedAvg {
 			t.Errorf("Expected avg item size %d, got %d", expectedAvg, avgSize)
 		}
@@ -118,7 +111,6 @@ func TestGetOptimalConcurrency(t *testing.T) {
 	cloner := &Cloner{}
 	concurrency := cloner.getOptimalConcurrency()
 
-	// Should return a reasonable default
 	if concurrency <= 0 || concurrency > 100 {
 		t.Errorf("Expected reasonable concurrency (1-100), got %d", concurrency)
 	}
@@ -128,7 +120,6 @@ func TestGetOptimalBatchSize(t *testing.T) {
 	cloner := &Cloner{}
 	batchSize := cloner.getOptimalBatchSize()
 
-	// DynamoDB batch write supports up to 25 items
 	if batchSize <= 0 || batchSize > 25 {
 		t.Errorf("Expected batch size 1-25, got %d", batchSize)
 	}
@@ -137,7 +128,6 @@ func TestGetOptimalBatchSize(t *testing.T) {
 func TestEstimateItemSize(t *testing.T) {
 	cloner := &Cloner{}
 	
-	// Test with sample item
 	item := map[string]types.AttributeValue{
 		"id":   &types.AttributeValueMemberS{Value: "12345"},
 		"name": &types.AttributeValueMemberS{Value: "test"},
@@ -146,12 +136,10 @@ func TestEstimateItemSize(t *testing.T) {
 
 	size := cloner.estimateItemSize(item)
 	
-	// Should return a reasonable estimate
 	if size <= 0 {
 		t.Error("Expected positive size estimate")
 	}
 	
-	// Test with larger item
 	largeItem := map[string]types.AttributeValue{
 		"id":          &types.AttributeValueMemberS{Value: "12345"},
 		"name":        &types.AttributeValueMemberS{Value: "test"},
@@ -168,8 +156,6 @@ func TestEstimateItemSize(t *testing.T) {
 }
 
 func TestCloneTableWithoutDatabase(t *testing.T) {
-	// Test CloneTable behavior without real DynamoDB connection
-	// Set verbose mode to avoid spinner interference in tests
 	internal.VerboseMode = true
 	defer func() { internal.VerboseMode = false }()
 
@@ -180,10 +166,8 @@ func TestCloneTableWithoutDatabase(t *testing.T) {
 		Region: "us-east-1",
 	}
 
-	// Try to create cloner - this may fail without AWS credentials
 	cloner, err := NewCloner(sourceConfig, destConfig)
 	if err != nil {
-		// Expected to fail in test environment
 		t.Logf("Expected error creating cloner without AWS credentials: %v", err)
 		return
 	}
@@ -199,13 +183,11 @@ func TestCloneTableWithoutDatabase(t *testing.T) {
 		BatchSize:   10,
 	}
 
-	// This should fail since we don't have real DynamoDB clients
 	err = cloner.CloneTable(ctx, "source-table", "dest-table", options)
 	if err == nil {
 		t.Error("Expected error when cloning without real DynamoDB connection")
 	}
 
-	// Should be a connection or client error
 	t.Logf("Got expected error: %v", err)
 }
 
@@ -219,7 +201,6 @@ func TestGetItemCountWithoutDatabase(t *testing.T) {
 
 	cloner, err := NewCloner(sourceConfig, destConfig)
 	if err != nil {
-		// Expected to fail in test environment
 		t.Logf("Expected error creating cloner: %v", err)
 		return
 	}
@@ -231,7 +212,6 @@ func TestGetItemCountWithoutDatabase(t *testing.T) {
 
 	ctx := context.Background()
 	
-	// This should fail without real DynamoDB
 	count, err := cloner.GetItemCount(ctx, "test-table", nil)
 	if err == nil {
 		t.Error("Expected error when getting item count without real DynamoDB")
@@ -244,7 +224,6 @@ func TestGetItemCountWithoutDatabase(t *testing.T) {
 }
 
 func TestCloneTableStructureWithoutDatabase(t *testing.T) {
-	// Set verbose mode to avoid spinner interference
 	internal.VerboseMode = true
 	defer func() { internal.VerboseMode = false }()
 
@@ -257,7 +236,6 @@ func TestCloneTableStructureWithoutDatabase(t *testing.T) {
 
 	cloner, err := NewCloner(sourceConfig, destConfig)
 	if err != nil {
-		// Expected to fail in test environment
 		t.Logf("Expected error creating cloner: %v", err)
 		return
 	}
@@ -269,7 +247,6 @@ func TestCloneTableStructureWithoutDatabase(t *testing.T) {
 
 	ctx := context.Background()
 	
-	// This should fail without real DynamoDB
 	err = cloner.CloneTableStructure(ctx, "source-table", "dest-table")
 	if err == nil {
 		t.Error("Expected error when cloning structure without real DynamoDB")
@@ -279,7 +256,6 @@ func TestCloneTableStructureWithoutDatabase(t *testing.T) {
 }
 
 func TestProgressCallback(t *testing.T) {
-	// Test progress callback functionality
 	var callbackCalled bool
 	var lastProcessed, lastTotal int64
 
@@ -293,7 +269,6 @@ func TestProgressCallback(t *testing.T) {
 		ProgressCallback: callback,
 	}
 
-	// Simulate calling the callback
 	if options.ProgressCallback != nil {
 		options.ProgressCallback(50, 100)
 	}
@@ -310,7 +285,6 @@ func TestProgressCallback(t *testing.T) {
 }
 
 func TestFilterExpressionHandling(t *testing.T) {
-	// Test that filter expressions are properly handled
 	filterExpression := "attribute_exists(active)"
 	attributeNames := map[string]string{
 		"#status": "status",
@@ -340,16 +314,13 @@ func TestFilterExpressionHandling(t *testing.T) {
 }
 
 func TestCloneOptionsDefaults(t *testing.T) {
-	// Test that CloneTable sets intelligent defaults
 	cloner := &Cloner{}
 	
-	// Test default concurrency
 	defaultConcurrency := cloner.getOptimalConcurrency()
 	if defaultConcurrency <= 0 {
 		t.Error("Expected positive default concurrency")
 	}
 
-	// Test default batch size  
 	defaultBatchSize := cloner.getOptimalBatchSize()
 	if defaultBatchSize <= 0 || defaultBatchSize > 25 {
 		t.Errorf("Expected batch size 1-25, got %d", defaultBatchSize)
@@ -357,9 +328,8 @@ func TestCloneOptionsDefaults(t *testing.T) {
 }
 
 func TestMetricsCalculations(t *testing.T) {
-	// Test metrics calculations and throughput
 	metrics := &CloneMetrics{
-		StartTime:      time.Now().Add(-10 * time.Second), // 10 seconds ago
+		StartTime:      time.Now().Add(-10 * time.Second),
 		ItemsProcessed: 1000,
 		BytesProcessed: 50000,
 	}
@@ -371,11 +341,10 @@ func TestMetricsCalculations(t *testing.T) {
 	if throughput <= 0 {
 		t.Error("Expected positive throughput")
 	}
-	if avgItemSize != 50 { // 50000 / 1000
+	if avgItemSize != 50 {
 		t.Errorf("Expected avg item size 50, got %d", avgItemSize)
 	}
 
-	// Test throughput calculation (should be around 100 items/sec for 10 second duration)
 	expectedThroughput := 100.0
 	if throughput < expectedThroughput*0.8 || throughput > expectedThroughput*1.2 {
 		t.Logf("Throughput %.2f items/sec (expected ~%.2f)", throughput, expectedThroughput)
@@ -383,7 +352,6 @@ func TestMetricsCalculations(t *testing.T) {
 }
 
 func TestConcurrentMetricsUpdates(t *testing.T) {
-	// Test that atomic operations work correctly under concurrent access
 	metrics := &CloneMetrics{}
 	
 	const numGoroutines = 10
@@ -391,7 +359,6 @@ func TestConcurrentMetricsUpdates(t *testing.T) {
 	
 	done := make(chan struct{})
 	
-	// Start concurrent goroutines updating metrics
 	for i := 0; i < numGoroutines; i++ {
 		go func() {
 			defer func() { done <- struct{}{} }()
@@ -403,7 +370,6 @@ func TestConcurrentMetricsUpdates(t *testing.T) {
 		}()
 	}
 	
-	// Wait for all goroutines to complete
 	for i := 0; i < numGoroutines; i++ {
 		<-done
 	}
@@ -424,18 +390,13 @@ func TestConcurrentMetricsUpdates(t *testing.T) {
 }
 
 func TestSpinnerIntegration(t *testing.T) {
-	// Test spinner behavior with DynamoDB operations
-	// This tests that spinners are properly created and managed
-	internal.VerboseMode = false // Enable spinners
+	internal.VerboseMode = false
 	defer func() { internal.VerboseMode = false }()
 
-	// Test spinner behavior - can't easily test actual spinner without real operations
-	// but we can verify the mode switching works
 	if internal.VerboseMode {
 		t.Error("Expected verbose mode to be false for spinner testing")
 	}
 
-	// Switch to verbose mode and verify spinners would be disabled
 	internal.VerboseMode = true
 	if !internal.VerboseMode {
 		t.Error("Expected verbose mode to be true")
@@ -443,26 +404,21 @@ func TestSpinnerIntegration(t *testing.T) {
 }
 
 func TestPerformanceOptimizations(t *testing.T) {
-	// Test that performance optimizations are properly configured
 	cloner := &Cloner{}
 	
-	// Test intelligent defaults
 	concurrency := cloner.getOptimalConcurrency()
 	batchSize := cloner.getOptimalBatchSize()
 	
-	// Concurrency should be reasonable for most workloads
 	if concurrency < 1 || concurrency > 50 {
 		t.Errorf("Expected concurrency 1-50, got %d", concurrency)
 	}
 	
-	// Batch size should match DynamoDB limits
 	if batchSize != 25 {
 		t.Errorf("Expected batch size 25 (DynamoDB limit), got %d", batchSize)
 	}
 }
 
 func TestConfigStructures(t *testing.T) {
-	// Test Config structure
 	config := Config{
 		Region: "us-west-1",
 	}
@@ -473,10 +429,8 @@ func TestConfigStructures(t *testing.T) {
 }
 
 func TestErrorHandling(t *testing.T) {
-	// Test error handling patterns
 	metrics := &CloneMetrics{}
 	
-	// Simulate error conditions
 	atomic.AddInt64(&metrics.ErrorCount, 1)
 	atomic.AddInt64(&metrics.RetryCount, 3)
 	
@@ -487,7 +441,6 @@ func TestErrorHandling(t *testing.T) {
 		t.Errorf("Expected 3 retries, got %d", metrics.RetryCount)
 	}
 	
-	// Test that errors are properly tracked
 	totalErrors := atomic.LoadInt64(&metrics.ErrorCount)
 	if totalErrors < 0 {
 		t.Error("Error count should not be negative")
@@ -495,11 +448,9 @@ func TestErrorHandling(t *testing.T) {
 }
 
 func TestProgressTracking(t *testing.T) {
-	// Test progress tracking logic similar to MySQL tests
 	var processedItems int64 = 0
 	var totalItems int64 = 100000
 	
-	// Simulate processing some items
 	atomic.AddInt64(&processedItems, 25000)
 	progress := float64(processedItems) / float64(totalItems) * 100
 	
@@ -508,18 +459,15 @@ func TestProgressTracking(t *testing.T) {
 		t.Errorf("Expected progress %.1f%%, got %.1f%%", expectedProgress, progress)
 	}
 	
-	// Test that progress doesn't cause issues when it exceeds 100%
-	atomic.AddInt64(&processedItems, 100000) // More than total
+	atomic.AddInt64(&processedItems, 100000)
 	progress = float64(processedItems) / float64(totalItems) * 100
 	
 	if progress <= 100.0 {
-		// This is actually okay - progress can exceed 100% if estimates are wrong
 		t.Logf("Progress is %.1f%% (estimates can be inaccurate)", progress)
 	}
 }
 
 func TestChannelBuffering(t *testing.T) {
-	// Test channel buffer size calculations
 	options := CloneOptions{
 		Concurrency: 10,
 		BatchSize:   25,
@@ -530,7 +478,6 @@ func TestChannelBuffering(t *testing.T) {
 		t.Errorf("Expected buffer size 250, got %d", expectedBuffer)
 	}
 	
-	// Test with different values
 	options.Concurrency = 5
 	options.BatchSize = 10
 	expectedBuffer = options.Concurrency * options.BatchSize
@@ -540,7 +487,6 @@ func TestChannelBuffering(t *testing.T) {
 }
 
 func TestPrefixBasedCloning(t *testing.T) {
-	// Test prefix-based cloning options
 	sourcePrefix := "allpoint.dev"
 	destPrefix := "julian.dev"
 	
@@ -560,7 +506,6 @@ func TestPrefixBasedCloning(t *testing.T) {
 }
 
 func TestDiscoverTablesWithPrefixWithAWS(t *testing.T) {
-	// Test table discovery with real AWS credentials (if available)
 	internal.VerboseMode = true
 	defer func() { internal.VerboseMode = false }()
 
@@ -573,7 +518,6 @@ func TestDiscoverTablesWithPrefixWithAWS(t *testing.T) {
 
 	cloner, err := NewCloner(sourceConfig, destConfig)
 	if err != nil {
-		// AWS credentials not configured, skip test
 		t.Skipf("AWS credentials not configured, skipping test: %v", err)
 		return
 	}
@@ -586,12 +530,10 @@ func TestDiscoverTablesWithPrefixWithAWS(t *testing.T) {
 	ctx := context.Background()
 	tables, err := cloner.DiscoverTablesWithPrefix(ctx, "allpoint.dev")
 	if err != nil {
-		// This is okay - might not have real tables with this prefix
 		t.Logf("Table discovery error (expected if no tables exist): %v", err)
 		return
 	}
 
-	// If we successfully found tables, log them
 	t.Logf("Found %d tables with prefix 'allpoint.dev'", len(tables))
 	if len(tables) > 0 {
 		sampleCount := len(tables)
@@ -603,7 +545,6 @@ func TestDiscoverTablesWithPrefixWithAWS(t *testing.T) {
 }
 
 func TestCloneTablesWithPrefixValidation(t *testing.T) {
-	// Test prefix-based cloning validation without actually cloning real tables
 	internal.VerboseMode = true
 	defer func() { internal.VerboseMode = false }()
 
@@ -616,7 +557,6 @@ func TestCloneTablesWithPrefixValidation(t *testing.T) {
 
 	cloner, err := NewCloner(sourceConfig, destConfig)
 	if err != nil {
-		// AWS credentials not configured, skip test
 		t.Skipf("AWS credentials not configured, skipping test: %v", err)
 		return
 	}
@@ -628,7 +568,6 @@ func TestCloneTablesWithPrefixValidation(t *testing.T) {
 
 	ctx := context.Background()
 	
-	// Test with non-existent prefix to avoid actually cloning real tables
 	options := CloneOptions{
 		SourcePrefix: "nonexistent.prefix.test",
 		DestPrefix:   "test.nonexistent.prefix",
@@ -641,7 +580,6 @@ func TestCloneTablesWithPrefixValidation(t *testing.T) {
 		t.Error("Expected error when cloning tables with non-existent prefix")
 	}
 
-	// Should get a "no tables found" error
 	if !strings.Contains(err.Error(), "no tables found") {
 		t.Errorf("Expected 'no tables found' error, got: %v", err)
 	}
@@ -650,11 +588,9 @@ func TestCloneTablesWithPrefixValidation(t *testing.T) {
 }
 
 func TestPrefixValidation(t *testing.T) {
-	// Test that prefix validation works correctly
 	cloner := &Cloner{}
 	ctx := context.Background()
 	
-	// Test missing source prefix
 	options := CloneOptions{
 		DestPrefix:  "julian.dev",
 		Concurrency: 5,
@@ -669,7 +605,6 @@ func TestPrefixValidation(t *testing.T) {
 		t.Errorf("Expected error about SourcePrefix, got: %v", err)
 	}
 	
-	// Test missing dest prefix
 	options = CloneOptions{
 		SourcePrefix: "allpoint.dev",
 		Concurrency:  5,
