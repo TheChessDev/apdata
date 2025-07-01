@@ -7,7 +7,6 @@ import (
 )
 
 func TestSimpleSpinner(t *testing.T) {
-	// Test successful operation
 	VerboseMode = false
 	
 	err := SimpleSpinner("Test operation", func() error {
@@ -35,7 +34,6 @@ func TestSimpleSpinnerWithError(t *testing.T) {
 }
 
 func TestSimpleSpinnerVerboseMode(t *testing.T) {
-	// Test that spinner is skipped in verbose mode
 	VerboseMode = true
 	defer func() { VerboseMode = false }()
 	
@@ -73,15 +71,13 @@ func TestNewSpinner(t *testing.T) {
 func TestSpinnerStartStop(t *testing.T) {
 	spinner := NewSpinner("Test")
 	
-	// Test starting
 	spinner.Start()
 	if !spinner.active {
 		t.Error("Spinner should be active after Start()")
 	}
 	
-	// Test stopping
 	spinner.Stop()
-	time.Sleep(150 * time.Millisecond) // Give it time to stop
+	time.Sleep(150 * time.Millisecond)
 	if spinner.active {
 		t.Error("Spinner should not be active after Stop()")
 	}
@@ -95,7 +91,6 @@ func TestSpinnerDoubleStart(t *testing.T) {
 		t.Error("Spinner should be active after first Start()")
 	}
 	
-	// Starting again should not cause issues
 	spinner.Start()
 	if !spinner.active {
 		t.Error("Spinner should still be active after second Start()")
@@ -126,7 +121,6 @@ func TestWithSpinner(t *testing.T) {
 }
 
 func TestWithSpinnerConditional(t *testing.T) {
-	// Test with spinner enabled
 	err := WithSpinnerConditional("Test operation", func() error {
 		return nil
 	}, true)
@@ -135,7 +129,6 @@ func TestWithSpinnerConditional(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 	
-	// Test with spinner disabled
 	err = WithSpinnerConditional("Test operation", func() error {
 		return nil
 	}, false)
@@ -146,18 +139,15 @@ func TestWithSpinnerConditional(t *testing.T) {
 }
 
 func TestLogLevelSettings(t *testing.T) {
-	// Save original state
 	originalVerboseMode := VerboseMode
 	defer func() { VerboseMode = originalVerboseMode }()
 	
-	// Test debug level sets verbose mode
 	SetLogLevel("debug")
 	if !VerboseMode {
 		t.Error("VerboseMode should be true when log level is debug")
 	}
 	
-	// Test other levels don't set verbose mode
-	VerboseMode = false // Reset before each test
+	VerboseMode = false
 	SetLogLevel("info")
 	if VerboseMode {
 		t.Error("VerboseMode should be false when log level is info")

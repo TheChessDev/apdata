@@ -14,7 +14,6 @@ func SimpleSpinner(message string, operation func() error) error {
 	done := make(chan bool)
 	errCh := make(chan error)
 
-	// Start the spinner in a goroutine
 	go func() {
 		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 		i := 0

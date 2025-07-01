@@ -10,9 +10,7 @@ import (
 	"apdata/mysql"
 )
 
-// Integration tests that test components working together
 func TestConfigIntegration(t *testing.T) {
-	// Test that config can be loaded and parsed correctly
 	tempDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
 	os.Setenv("HOME", tempDir)
@@ -23,7 +21,6 @@ func TestConfigIntegration(t *testing.T) {
 		t.Errorf("Failed to load default config: %v", err)
 	}
 
-	// Should have default examples
 	mysqlConns, dynamoConns := cfg.GetConfiguredConnections()
 	if len(mysqlConns) == 0 {
 		t.Error("Expected at least one MySQL connection in default config")
@@ -32,14 +29,12 @@ func TestConfigIntegration(t *testing.T) {
 		t.Error("Expected at least one DynamoDB connection in default config")
 	}
 
-	// Test parsing connection strings work with config
 	for _, conn := range mysqlConns {
 		connStr, err := config.ParseConnectionString(conn)
 		if err != nil {
 			t.Errorf("Failed to parse connection string '%s': %v", conn, err)
 		}
 		
-		// Should be able to get config back
 		_, err = cfg.GetMySQLConfig(connStr.Client, connStr.Env)
 		if err != nil {
 			t.Errorf("Failed to get MySQL config for '%s': %v", conn, err)
@@ -48,7 +43,6 @@ func TestConfigIntegration(t *testing.T) {
 }
 
 func TestMySQLClonerWithConfig(t *testing.T) {
-	// Test that MySQL cloner can be created from config
 	source := mysql.Config{
 		Host:     "source.example.com",
 		Port:     3306,
@@ -60,7 +54,7 @@ func TestMySQLClonerWithConfig(t *testing.T) {
 		Host:     "dest.example.com", 
 		Port:     3306,
 		User:     "user",
-		Password: "",  // Test passwordless
+		Password: "",
 		Database: "destdb",
 	}
 
@@ -69,7 +63,6 @@ func TestMySQLClonerWithConfig(t *testing.T) {
 		t.Error("Failed to create MySQL cloner")
 	}
 
-	// Test that the cloner has the correct config
 	if cloner.Source.Host != source.Host {
 		t.Error("Source config not set correctly")
 	}
@@ -79,7 +72,6 @@ func TestMySQLClonerWithConfig(t *testing.T) {
 }
 
 func TestSpinnerIntegration(t *testing.T) {
-	// Test that spinner works with different modes
 	internal.VerboseMode = false
 	
 	executed := false
@@ -95,7 +87,6 @@ func TestSpinnerIntegration(t *testing.T) {
 		t.Error("Operation should have been executed")
 	}
 
-	// Test verbose mode disables spinner but still executes
 	internal.VerboseMode = true
 	executed = false
 	
@@ -111,12 +102,10 @@ func TestSpinnerIntegration(t *testing.T) {
 		t.Error("Operation should have been executed in verbose mode")
 	}
 	
-	// Reset
 	internal.VerboseMode = false
 }
 
 func TestErrorHandlingIntegration(t *testing.T) {
-	// Test that the simplified schema cloning approach works
 	cloner := mysql.NewCloner(
 		mysql.Config{
 			Host:     "source.test",
@@ -128,7 +117,6 @@ func TestErrorHandlingIntegration(t *testing.T) {
 		},
 	)
 
-	// Test that CloneSchema always recreates database
 	internal.VerboseMode = true
 	defer func() { internal.VerboseMode = false }()
 	
@@ -137,7 +125,6 @@ func TestErrorHandlingIntegration(t *testing.T) {
 		t.Error("Expected error without real database connection")
 	}
 	
-	// Should fail on database recreation step
 	if !strings.Contains(err.Error(), "failed to recreate database") {
 		t.Logf("Got expected error: %v", err)
 	}
