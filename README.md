@@ -183,9 +183,9 @@ The tool uses different cloning strategies for each database type:
 
 The tool supports different filtering approaches for each database type:
 
-**MySQL Filtering** (using `--where`):
+**MySQL Filtering** (using `--where` with `--table`):
 ```bash
-# SQL-style WHERE clauses
+# SQL-style WHERE clauses (requires specific table)
 ./apdata clone mysql --source acme/dev --dest my-client/dev --table users --where "created_at > '2024-01-01'"
 ./apdata clone mysql --source acme/dev --dest my-client/dev --table orders --where "status = 'active' AND amount > 100"
 ```
@@ -284,7 +284,7 @@ Use ↑/↓ to navigate, SPACE to select/deselect, ENTER to confirm
 
 #### MySQL-Specific Flags
 - `--table`: Specific table name to clone 
-- `--where`: WHERE clause for filtering records (e.g., `"created_at > '2024-01-01'"`)
+- `--where`: WHERE clause for filtering records (requires `--table`, e.g., `"created_at > '2024-01-01'"`)
 - `--schema-only`: Clone schema only
 - `--data-only`: Clone data only
 

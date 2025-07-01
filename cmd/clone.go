@@ -81,6 +81,16 @@ func runClone(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--filter flag is only supported for DynamoDB. For MySQL, use --where for filtering records")
 	}
 
+	// Validate where flag usage - only allow with MySQL and --table
+	if whereClause != "" {
+		if cloneType != "mysql" {
+			return fmt.Errorf("--where flag is only supported for MySQL. For DynamoDB, use --filter for filtering records")
+		}
+		if table == "" {
+			return fmt.Errorf("--where flag requires --table to specify which table to filter. Use --where with --table for record filtering")
+		}
+	}
+
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -181,9 +191,12 @@ func cloneMySQLData(cfg *config.Config, source, dest, table, whereClause string,
 
 	// MySQL clones exact table names without any prefix logic
 	if !dataOnly {
-		internal.Logger.Info("Cloning MySQL schema")
-		if err := cloner.CloneSchema(); err != nil {
-			return fmt.Errorf("failed to clone schema: %w", err)
+		// Only clone full schema if we're not targeting a specific table
+		if table == "" {
+			internal.Logger.Info("Cloning MySQL schema")
+			if err := cloner.CloneSchema(); err != nil {
+				return fmt.Errorf("failed to clone schema: %w", err)
+			}
 		}
 	}
 
@@ -191,14 +204,23 @@ func cloneMySQLData(cfg *config.Config, source, dest, table, whereClause string,
 		internal.Logger.Info("Cloning MySQL data")
 
 		if whereClause != "" && table != "" {
+			// For filtered single table clone, ensure table exists with correct schema
+			if err := cloner.EnsureTableExists(table); err != nil {
+				return fmt.Errorf("failed to ensure table exists: %w", err)
+			}
 			if err := cloner.CloneWithFilter(table, whereClause); err != nil {
 				return fmt.Errorf("failed to clone table with filter: %w", err)
 			}
 		} else if table != "" {
+			// For single table clone, ensure table exists with correct schema
+			if err := cloner.EnsureTableExists(table); err != nil {
+				return fmt.Errorf("failed to ensure table exists: %w", err)
+			}
 			if err := cloner.CloneData([]string{table}); err != nil {
 				return fmt.Errorf("failed to clone table: %w", err)
 			}
 		} else {
+			// Full database clone
 			if err := cloner.CloneData(nil); err != nil {
 				return fmt.Errorf("failed to clone data: %w", err)
 			}
@@ -373,7 +395,7 @@ func init() {
 	cloneCmd.Flags().String("table", "", "Optional table name (MySQL only)")
 	cloneCmd.Flags().String("component-name", "", "Optional component name for prefix-based cloning (DynamoDB only, e.g., connectors-data-api)")
 	cloneCmd.Flags().String("filter", "", "Optional filter expression (DynamoDB only, e.g., \"DocumentType = 'CatalogStyle'\")")
-	cloneCmd.Flags().String("where", "", "Optional WHERE clause (MySQL only, e.g., \"created_at > '2024-01-01'\")")
+	cloneCmd.Flags().String("where", "", "Optional WHERE clause (MySQL only, requires --table, e.g., \"created_at > '2024-01-01'\")")
 	cloneCmd.Flags().Bool("schema-only", false, "Clone schema only (MySQL)")
 	cloneCmd.Flags().Bool("data-only", false, "Clone data only (MySQL)")
 	cloneCmd.Flags().Int("concurrency", 25, "Number of concurrent workers for DynamoDB")

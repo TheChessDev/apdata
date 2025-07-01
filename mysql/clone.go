@@ -439,6 +439,70 @@ func (c *Cloner) connectDest() (*sql.DB, error) {
 	return sql.Open("mysql", dsn)
 }
 
+// EnsureTableExists ensures the destination table exists with the same schema as the source table.
+// It will drop the existing destination table if it exists and recreate it with the source schema.
+// This method handles foreign key constraints by temporarily disabling foreign key checks.
+func (c *Cloner) EnsureTableExists(table string) error {
+	internal.Logger.Debug("Ensuring table exists", "table", table)
+
+	// Connect to source database
+	sourceDB, err := c.connectSource()
+	if err != nil {
+		return fmt.Errorf("failed to connect to source database: %w", err)
+	}
+	defer sourceDB.Close()
+
+	// Connect to destination database
+	destDB, err := c.connectDest()
+	if err != nil {
+		return fmt.Errorf("failed to connect to destination database: %w", err)
+	}
+	defer destDB.Close()
+
+	// Get CREATE TABLE statement from source
+	var createTableSQL string
+	query := fmt.Sprintf("SHOW CREATE TABLE `%s`", table)
+	row := sourceDB.QueryRow(query)
+	
+	var tableName string
+	if err := row.Scan(&tableName, &createTableSQL); err != nil {
+		return fmt.Errorf("failed to get CREATE TABLE statement for table %s: %w", table, err)
+	}
+
+	internal.Logger.Debug("Retrieved CREATE TABLE statement", "table", table)
+
+	// Disable foreign key checks to handle tables with foreign key constraints
+	if _, err := destDB.Exec("SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		return fmt.Errorf("failed to disable foreign key checks: %w", err)
+	}
+	internal.Logger.Debug("Disabled foreign key checks", "table", table)
+
+	// Ensure foreign key checks are re-enabled even if an error occurs
+	defer func() {
+		if _, err := destDB.Exec("SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+			internal.Logger.Error("Failed to re-enable foreign key checks", "table", table, "error", err)
+		} else {
+			internal.Logger.Debug("Re-enabled foreign key checks", "table", table)
+		}
+	}()
+
+	// Drop the table if it exists in destination
+	dropQuery := fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table)
+	if _, err := destDB.Exec(dropQuery); err != nil {
+		return fmt.Errorf("failed to drop existing table %s in destination: %w", table, err)
+	}
+
+	internal.Logger.Debug("Dropped existing table if present", "table", table)
+
+	// Create the table in destination with the same schema
+	if _, err := destDB.Exec(createTableSQL); err != nil {
+		return fmt.Errorf("failed to create table %s in destination: %w", table, err)
+	}
+
+	internal.Logger.Debug("Table schema created successfully", "table", table)
+	return nil
+}
+
 func (c *Cloner) importSQL(filename string) error {
 	// Performance optimized mysql import
 	args := []string{
@@ -832,7 +896,8 @@ func (c *Cloner) getTableColumns(db *sql.DB, table string) ([]string, error) {
 
 	var columns []string
 	for rows.Next() {
-		var field, type_, null, key, default_, extra string
+		var field, type_, null, key, extra string
+		var default_ sql.NullString
 		if err := rows.Scan(&field, &type_, &null, &key, &default_, &extra); err != nil {
 			return nil, err
 		}

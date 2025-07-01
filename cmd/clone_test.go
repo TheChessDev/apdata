@@ -155,8 +155,8 @@ func TestCloneCommandFlags(t *testing.T) {
 	
 	// Test flag types
 	concurrencyFlag := flags.Lookup("concurrency")
-	if concurrencyFlag != nil && concurrencyFlag.DefValue != "10" {
-		t.Errorf("Expected concurrency default to be '10', got '%s'", concurrencyFlag.DefValue)
+	if concurrencyFlag != nil && concurrencyFlag.DefValue != "25" {
+		t.Errorf("Expected concurrency default to be '25', got '%s'", concurrencyFlag.DefValue)
 	}
 	
 	// Test boolean flags
