@@ -170,7 +170,9 @@ To add your own configurations, edit `~/.apdata/config.json` and add entries fol
 The tool uses different cloning strategies for each database type:
 
 **MySQL**: Clones exact table names as they exist in the source database
-- Clones all tables in the database or specific tables with `--table`
+- **Full Database Clone**: Clones all tables in the database (recreates destination database)
+- **Single Table Clone**: When using `--table`, only affects that specific table (preserves other tables)
+- **Filtered Clone**: When using `--table` with `--where`, clones only matching records to the specific table
 - No automatic prefix manipulation - copies tables with their exact names
 - Use different source/dest databases for isolation
 
@@ -186,9 +188,16 @@ The tool supports different filtering approaches for each database type:
 **MySQL Filtering** (using `--where` with `--table`):
 ```bash
 # SQL-style WHERE clauses (requires specific table)
+# Note: --where can only be used with --table for single table filtering
 ./apdata clone mysql --source acme/dev --dest my-client/dev --table users --where "created_at > '2024-01-01'"
 ./apdata clone mysql --source acme/dev --dest my-client/dev --table orders --where "status = 'active' AND amount > 100"
 ```
+
+**Important**: The `--where` flag:
+- Can only be used with MySQL (not DynamoDB)  
+- Requires `--table` to specify which table to filter
+- Replaces all data in the destination table with filtered results from source
+- Preserves other tables in the destination database unchanged
 
 **DynamoDB Filtering** (using `--filter`):
 ```bash
@@ -305,8 +314,11 @@ Use ↑/↓ to navigate, SPACE to select/deselect, ENTER to confirm
 # Full database clone
 ./apdata clone mysql --source acme/prod --dest acme/local
 
-# Clone recent user data
+# Clone specific table with filtered data (only affects that table)
 ./apdata clone mysql --source acme/prod --dest acme/local --table users --where "last_login > '2024-01-01'"
+
+# Clone specific table without filter (only affects that table)
+./apdata clone mysql --source acme/prod --dest acme/local --table users
 
 # Setup new environment (schema only)
 ./apdata clone mysql --source acme/prod --dest acme/staging --schema-only
